@@ -1,5 +1,6 @@
 
 use celeriant_msg::process_client_responses::ClientResponse;
+use celeriant_msg::process_identify::{IDENTIFY_RESPONSE_MAX_BYTES, IDENTIFY_RESPONSE_TYPE_ID};
 use celeriant_msg::read_wire_data_error::ReadWireDataError;
 use celeriant_wal::compression_type::CompressionType;
 use celeriant_wire::codec::compression::decompress_with_dict;
@@ -21,6 +22,18 @@ where
         .await
         .map_err(ReadWireDataError::ReadHeaderFailure)?;
     read_from_header(header, reader, dict_bytes).await
+}
+
+pub(crate) async fn read_identify_header<R>(reader: &mut R, max_response_size: u64) -> Result<WireHeader, WireError>
+where
+    R: AsyncReadExt + Unpin,
+{
+    let header = WireHeader::from_reader(reader, IDENTIFY_RESPONSE_MAX_BYTES).await?;
+    let message_length = header.compressed_length.max(header.uncompressed_length) as u64;
+    if header.message_type != IDENTIFY_RESPONSE_TYPE_ID && message_length > max_response_size {
+        return Err(WireError::MessageTooLarge { message_length, max_size_bytes: max_response_size });
+    }
+    Ok(header)
 }
 
 pub(crate) async fn read_from_header<R>(

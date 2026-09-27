@@ -1,5 +1,7 @@
+use std::fmt;
 use std::path::Path;
 
+use celeriant_wal::builtin_dict::DICTIONARY_CEILING_BYTES;
 use hex::ToHex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -27,6 +29,39 @@ pub struct ServerMeta {
     pub reserve_coordinator_shard: bool,
     #[serde(default)]
     pub compression: CompressionMeta,
+}
+
+#[derive(Debug)]
+pub enum DictionaryError {
+    Unreadable(std::io::Error),
+    ExceedsCeiling { size_bytes: u64 },
+}
+
+impl fmt::Display for DictionaryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unreadable(e) => write!(f, "Failed to read {DICT_FILE_NAME}: {e}"),
+            Self::ExceedsCeiling { size_bytes } => write!(
+                f,
+                "{DICT_FILE_NAME} is {size_bytes} bytes, over the {DICTIONARY_CEILING_BYTES}-byte (1 MiB) dictionary ceiling"
+            ),
+        }
+    }
+}
+
+fn check_dictionary_ceiling(dict_path: &Path) -> Result<(), DictionaryError> {
+    let size_bytes = std::fs::metadata(dict_path).map_err(DictionaryError::Unreadable)?.len();
+    if size_bytes > DICTIONARY_CEILING_BYTES as u64 {
+        return Err(DictionaryError::ExceedsCeiling { size_bytes });
+    }
+    Ok(())
+}
+
+/// Reads the cluster dictionary, refusing one over the protocol ceiling.
+pub fn load_dictionary(data_root: &Path) -> Result<Vec<u8>, DictionaryError> {
+    let dict_path = data_root.join(DICT_FILE_NAME);
+    check_dictionary_ceiling(&dict_path)?;
+    std::fs::read(&dict_path).map_err(DictionaryError::Unreadable)
 }
 
 fn sha256_of_file(path: &Path) -> Result<String, String> {
@@ -93,6 +128,8 @@ pub fn validate_or_create(
         }
         (false, true) => {
             // M absent, D present: adopt the pre-staged dict; sha will be stored in M below.
+            // Refuse before M pins the sha of a dict that load_dictionary would reject.
+            check_dictionary_ceiling(&dict_path).map_err(|e| e.to_string())?;
         }
         (true, false) => {
             // M present, D absent: rehydrate from built-in if sha matches, else fail.
@@ -625,5 +662,31 @@ dictionary_name = "test-dict-v1"
             err.contains("sha256") || err.contains("dictionary_sha256"),
             "error should mention sha256: {err}"
         );
+    }
+
+    #[test]
+    fn load_dictionary_accepts_exactly_the_ceiling() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join(DICT_FILE_NAME), vec![7u8; DICTIONARY_CEILING_BYTES]).unwrap();
+        assert_eq!(load_dictionary(dir.path()).unwrap().len(), DICTIONARY_CEILING_BYTES);
+    }
+
+    #[test]
+    fn load_dictionary_refuses_one_byte_over_the_ceiling() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join(DICT_FILE_NAME), vec![7u8; DICTIONARY_CEILING_BYTES + 1]).unwrap();
+        let err = load_dictionary(dir.path()).unwrap_err();
+        assert!(matches!(err, DictionaryError::ExceedsCeiling { size_bytes } if size_bytes == DICTIONARY_CEILING_BYTES as u64 + 1));
+        assert!(err.to_string().contains("1048576"));
+    }
+
+    #[test]
+    fn oversize_pre_staged_dict_is_refused_before_meta_is_written() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join(DICT_FILE_NAME), vec![7u8; DICTIONARY_CEILING_BYTES + 1]).unwrap();
+        let desired = zstd_dict_compression("custom");
+        let err = validate_or_create(dir.path(), &test_meta(), &desired, Some(builtin_resolver)).unwrap_err();
+        assert!(err.contains("1048576"), "{err}");
+        assert!(!dir.path().join(FILE_NAME).exists());
     }
 }

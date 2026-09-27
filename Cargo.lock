@@ -880,6 +880,7 @@ dependencies = [
  "jsonschema",
  "lru 0.16.2",
  "metrics",
+ "metrics-exporter-prometheus",
  "mimalloc",
  "num_cpus",
  "prost",
@@ -954,6 +955,7 @@ dependencies = [
  "rmp-serde",
  "serde",
  "serde_json",
+ "sha2",
  "zstd",
 ]
 

@@ -95,6 +95,10 @@ fn register_metric_descriptions() {
     describe_gauge!("celeriant_last_self_acked_wal_seq", "Highest wal_seq this node acked to clients as leader (ack barrier); persists across demotion and restart");
     describe_gauge!("celeriant_node_status_code", "Per-shard node status: 0=BootCatchup 1=Follower 2=FollowerCatchingUp 3=Promoting 4=Leader 5=Fenced 6=Standalone");
     describe_counter!("celeriant_replication_s3_fallbacks_total", "Replication S3 fallbacks");
+    describe_counter!("celeriant_identify_dictionary_bytes_shipped_total", "Dictionary bytes sent in IdentifyResponse frames; stays flat once clients cache the cluster dictionary");
+    // Registered at boot so a scrape reads an exact 0 before the first handshake.
+    metrics::counter!("celeriant_identify_dictionary_bytes_shipped_total").absolute(0);
+    describe_counter!("celeriant_internode_dictionary_mismatch_total", "Replication connections refused because the two nodes hold different dictionaries (compared by sha256), by role: dialer or acceptor");
     describe_counter!("celeriant_replication_intra_batch_chain_break_total", "Chain break detected within a single replication batch");
     describe_counter!("celeriant_replication_tip_hash_mismatch_kick_total", "Follower tip-hash mismatch; kicked into S3 catchup");
     describe_counter!("celeriant_replicate_stale_lease_total", "Replication rejected by follower: stale leader lease");

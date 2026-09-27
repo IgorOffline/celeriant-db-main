@@ -1,3 +1,7 @@
+/// Protocol ceiling on any compression dictionary, built-in or pre-staged. The server refuses to start above it,
+/// and clients bound the Identify handshake by it instead of their response cap.
+pub const DICTIONARY_CEILING_BYTES: usize = 1024 * 1024;
+
 pub const BUILTIN_DICT_NAME: &str = "json-web-events-v1";
 pub const BUILTIN_DICT_BYTES: &[u8] =
     include_bytes!("../dicts/json_web_events_v1.zstd_dict");
@@ -20,6 +24,11 @@ mod tests {
     #[test]
     fn builtin_dict_bytes_is_nonempty() {
         assert!(BUILTIN_DICT_BYTES.len() >= 256, "dict too small: {} bytes", BUILTIN_DICT_BYTES.len());
+    }
+
+    #[test]
+    fn builtin_dict_fits_the_ceiling() {
+        assert!(BUILTIN_DICT_BYTES.len() <= DICTIONARY_CEILING_BYTES);
     }
 
     #[test]

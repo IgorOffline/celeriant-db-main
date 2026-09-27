@@ -22,6 +22,7 @@ rmp-serde.workspace = true
 zstd.workspace = true
 futures-lite.workspace = true
 crc32c.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true

@@ -10,14 +10,15 @@ use celeriant_msg::{
     process_client_responses::ClientResponse,
     process_cluster_requests::ClusterRequest,
     process_cluster_responses::ClusterResponse,
+    process_dict_hello::{DICT_HELLO_REQUEST_TYPE_ID, DICT_HELLO_RESPONSE_TYPE_ID, DictHello, check_dict_agreement, read_dict_hello, write_dict_hello},
     process_identify::{IDENTIFY_REQUEST_TYPE_ID, read_identify_request, write_identify_response},
     request::requests::{HeartbeatRequest, IdentifyRequest, KickFollowerRequest, WatchRequest},
-    response::responses::{AccessLevel, ErrorResponse, HeartbeatRejection, HeartbeatResponse, HeartbeatResult, IdentifyResponse, KickFollowerResponse, WatchResponse},
+    response::responses::{AccessLevel, ErrorResponse, HeartbeatRejection, HeartbeatResponse, HeartbeatResult, IdentifyResponse, KickFollowerResponse, ProtocolErrorResponse, WatchResponse},
 };
 use celeriant_shard::{
     error::{s3_catchup_error::S3CatchupError, watch_session_error::WatchSessionError}, replication_client::ReplicationClient, s3_downloader::S3Downloader, shard_wal::ShardWal, shard_wal_s3_catchup::S3CatchupResult
 };
-use celeriant_wire::codec::compression::DictCodec;
+use celeriant_wire::codec::compression::{DictCodec, Sha256Hex};
 use celeriant_watch::{aggregate_reader::WatchReadError, watch_output_type::WatchOutputType, watch_session::WatchSession};
 use celeriant_msg::read_wire_data_error::ReadWireDataError;
 use celeriant_wire::network::wire_error::WireError;
@@ -211,41 +212,38 @@ pub fn handle_new_connection<R: ReplicationClient + 'static, D: S3Downloader + '
                     }
                 };
 
-                let (request, message_version) = match first_message {
-                    FirstMessage::Identify(identify_req, version) => {
-                        if let Err(response) = handle_identify(&identify_req, &mut conn_state, &ctx.config) {
-                            let _ = write_client_response_with_timeout(&mut tcp_stream, &response, ctx.config.max_response_size, conn_state.client_has_dict, &ctx.dict_codec, version, ctx.config.slow_client_timeout).await;
-                            return;
-                        }
-                        let (compression_dict_sha256, compression_dict_bytes) =
-                            build_identify_dict_fields(&identify_req.known_dict_sha256, &ctx.config);
-                        let res = IdentifyResponse {
-                            correlation_id: identify_req.correlation_id,
-                            client_id: conn_state.verified_client_id,
-                            access_level: conn_state.access_level,
-                            compression_dict_sha256,
-                            compression_dict_bytes,
-                        };
-                        if write_identify_response(&mut tcp_stream, &res, version).await.is_err() {
-                            return;
-                        }
-                        match read_client_request(&mut tcp_stream, &ctx, version).await {
-                            Some(r) => r,
-                            None => return,
-                        }
+                let (identify_req, version) = match first_message {
+                    FirstMessage::Identify(identify_req, version) => (identify_req, version),
+                    FirstMessage::NotIdentify(version) => {
+                        debug!(shard_id = ctx.current_shard_id, peer = %peer_addr, "Closing connection: first frame was not Identify");
+                        let response = ClientResponse::ProtocolError(ProtocolErrorResponse {});
+                        let _ = write_client_response_with_timeout(&mut tcp_stream, &response, ctx.config.max_response_size, conn_state.client_has_dict, &ctx.dict_codec, version, ctx.config.slow_client_timeout).await;
+                        return;
                     }
-                    FirstMessage::ClientRequest(request, version) => {
-                        if ctx.config.require_client_identity {
-                            let response = ClientResponse::GenericError(ErrorResponse {
-                                correlation_id: request.correlation_id(),
-                                error_code: error_codes::IDENTIFY_REQUIRED,
-                                error_message: "Server requires client identity verification".to_string(),
-                            });
-                            let _ = write_client_response_with_timeout(&mut tcp_stream, &response, ctx.config.max_response_size, conn_state.client_has_dict, &ctx.dict_codec, version, ctx.config.slow_client_timeout).await;
-                            return;
-                        }
-                        (request, version)
-                    }
+                };
+                if let Err(response) = handle_identify(&identify_req, &mut conn_state, &ctx.config) {
+                    let _ = write_client_response_with_timeout(&mut tcp_stream, &response, ctx.config.max_response_size, conn_state.client_has_dict, &ctx.dict_codec, version, ctx.config.slow_client_timeout).await;
+                    return;
+                }
+                let (compression_dict_sha256, compression_dict_bytes) =
+                    build_identify_dict_fields(&identify_req.known_dict_sha256, &ctx.config);
+                let shipped_dict_len = compression_dict_bytes.as_ref().map(Vec::len);
+                let res = IdentifyResponse {
+                    correlation_id: identify_req.correlation_id,
+                    client_id: conn_state.verified_client_id,
+                    access_level: conn_state.access_level,
+                    compression_dict_sha256,
+                    compression_dict_bytes,
+                };
+                if write_identify_response(&mut tcp_stream, &res, version).await.is_err() {
+                    return;
+                }
+                if let Some(len) = shipped_dict_len {
+                    metrics::counter!("celeriant_identify_dictionary_bytes_shipped_total").increment(len as u64);
+                }
+                let (request, message_version) = match read_client_request(&mut tcp_stream, &ctx, version).await {
+                    Some(r) => r,
+                    None => return,
                 };
 
                 match check_client_redirect(tcp_stream, request, ctx.config.max_response_size, message_version, &ctx, &conn_state).await {
@@ -259,26 +257,21 @@ pub fn handle_new_connection<R: ReplicationClient + 'static, D: S3Downloader + '
                 }
             }
             PortType::Replication => {
-                let (request, message_version) = if trailing.is_empty() {
-                    match read_cluster_request(&mut tcp_stream, &ctx).await {
-                        Some(r) => r,
-                        None => return,
-                    }
-                } else {
-                    let mut reader = PrefixedReader::new(trailing, &mut tcp_stream);
-                    match read_cluster_request_from(&mut reader, &ctx).await {
-                        Some(r) => r,
-                        None => return,
-                    }
+                let Some(agreed) = agree_dictionary(&mut tcp_stream, trailing, &ctx, &peer_addr).await else {
+                    return;
+                };
+                let (request, message_version) = match read_cluster_request(&mut tcp_stream, &ctx, &agreed).await {
+                    Some(r) => r,
+                    None => return,
                 };
 
-                match check_cluster_redirect(tcp_stream, request, ctx.config.max_response_size, message_version, &ctx).await {
+                match check_cluster_redirect(tcp_stream, request, ctx.config.max_response_size, message_version, &ctx, &agreed).await {
                     ClusterRedirectResult::ProcessLocally(request, tcp_stream) => {
-                        handle_cluster_pipelining(tcp_stream, Some(request), ctx.config.max_response_size, message_version, ctx).await;
+                        handle_cluster_pipelining(tcp_stream, Some(request), ctx.config.max_response_size, message_version, ctx, agreed).await;
                     }
                     ClusterRedirectResult::Redirected => {}
                     ClusterRedirectResult::ErrorSentContinue(tcp_stream) => {
-                        handle_cluster_pipelining(tcp_stream, None, ctx.config.max_response_size, message_version, ctx).await;
+                        handle_cluster_pipelining(tcp_stream, None, ctx.config.max_response_size, message_version, ctx, agreed).await;
                     }
                 }
             }
@@ -306,7 +299,7 @@ pub fn handle_redirected_client_connection<R: ReplicationClient + 'static, D: S3
 
     glommio::spawn_local(async move {
         let _guard = ctx.connection_gauges.enter(PortType::Client);
-        let conn_state = ConnectionState { verified_client_id, access_level, client_has_dict: false };
+        let conn_state = ConnectionState { verified_client_id, access_level, client_has_dict: true };
         handle_client_pipelining(tcp_stream, Some(request), max_response_size, message_version, ctx, conn_state).await;
     })
     .detach();
@@ -318,12 +311,13 @@ pub fn handle_redirected_cluster_connection<R: ReplicationClient + 'static, D: S
     max_response_size: u64,
     message_version: u32,
     ctx: ConnectionContext<R, D, S>,
+    agreed: DictAgreed,
 ) {
     let _ = tcp_stream.set_nodelay(true);
 
     glommio::spawn_local(async move {
         let _guard = ctx.connection_gauges.enter(PortType::Replication);
-        handle_cluster_pipelining(tcp_stream, Some(request), max_response_size, message_version, ctx).await;
+        handle_cluster_pipelining(tcp_stream, Some(request), max_response_size, message_version, ctx, agreed).await;
     })
     .detach();
 }
@@ -493,6 +487,7 @@ async fn handle_cluster_pipelining<R: ReplicationClient + 'static, D: S3Download
     max_response_size: u64,
     message_version: u32,
     ctx: ConnectionContext<R, D, S>,
+    agreed: DictAgreed,
 ) {
     let mut optional_request = request;
 
@@ -509,7 +504,7 @@ async fn handle_cluster_pipelining<R: ReplicationClient + 'static, D: S3Download
             break;
         }
 
-        match read_cluster_request(&mut tcp_stream, &ctx).await {
+        match read_cluster_request(&mut tcp_stream, &ctx, &agreed).await {
             Some((next_request, next_version)) => {
                 if next_version != message_version {
                     debug!(
@@ -530,7 +525,7 @@ async fn handle_cluster_pipelining<R: ReplicationClient + 'static, D: S3Download
         }
 
         if let Some(request) = optional_request.take() {
-            match check_cluster_redirect(tcp_stream, request, max_response_size, message_version, &ctx).await {
+            match check_cluster_redirect(tcp_stream, request, max_response_size, message_version, &ctx, &agreed).await {
                 ClusterRedirectResult::ProcessLocally(req, stream) => {
                     optional_request = Some(req);
                     tcp_stream = stream;
@@ -575,6 +570,16 @@ fn handle_identify(req: &celeriant_msg::request::requests::IdentifyRequest, conn
         conn_state.verified_client_id = Some(client_id);
     }
 
+    // An API key grants access, not identity, so it cannot stand in for the key pair.
+    if config.require_client_identity && conn_state.verified_client_id.is_none() {
+        debug!("Identity rejected: server requires a verified key pair");
+        return Err(ClientResponse::GenericError(ErrorResponse {
+            correlation_id: req.correlation_id,
+            error_code: error_codes::IDENTIFY_REQUIRED,
+            error_message: "Server requires a verified key pair".to_string(),
+        }));
+    }
+
     if let Some(ref api_key_hashes) = *config.api_key_hashes.borrow() {
         let api_key_str = req.api_key.as_ref().ok_or_else(|| {
             ClientResponse::GenericError(ErrorResponse {
@@ -617,6 +622,13 @@ fn handle_identify(req: &celeriant_msg::request::requests::IdentifyRequest, conn
         })?;
 
         conn_state.access_level = Some(access_level);
+    } else if req.api_key.is_some() {
+        debug!("Identity rejected: API key presented but no keys are configured");
+        return Err(ClientResponse::GenericError(ErrorResponse {
+            correlation_id: req.correlation_id,
+            error_code: error_codes::AUTH_INVALID_KEY,
+            error_message: "API key presented but the server has no API keys configured".to_string(),
+        }));
     } else {
         conn_state.access_level = None;
     }
@@ -752,6 +764,7 @@ async fn check_cluster_redirect<R: ReplicationClient + 'static, D: S3Downloader 
     max_message_size: u64,
     message_version: u32,
     ctx: &ConnectionContext<R, D, S>,
+    agreed: &DictAgreed,
 ) -> ClusterRedirectResult {
     let target_shard = match determine_cluster_shard(&request, &ctx.config) {
         Ok(idx) => idx,
@@ -773,6 +786,7 @@ async fn check_cluster_redirect<R: ReplicationClient + 'static, D: S3Downloader 
             accepted_tcp_stream: tcp_stream.into_accepted(),
             request,
             message_version,
+            agreed: agreed.clone(),
         };
         if let Err(e) = ctx.intrashard_sender.try_send_to(target_shard, msg) {
             metrics::counter!("celeriant_mesh_channel_full_total", "message_type" => "cluster_redirect").increment(1);
@@ -988,7 +1002,7 @@ fn collect_unique_shard_id(
 
 enum FirstMessage {
     Identify(IdentifyRequest, u32),
-    ClientRequest(ClientRequest, u32),
+    NotIdentify(u32),
 }
 
 /// Read the first message on a new client connection.
@@ -1045,9 +1059,62 @@ async fn read_client_request<R: ReplicationClient + 'static, D: S3Downloader + '
     }).await
 }
 
+/// Proof that the peer on a replication connection compresses with this node's dictionary.
+/// Only `agree_dictionary` makes one, and no cluster request is read without one.
+#[derive(Debug, Clone)]
+pub struct DictAgreed(());
+
+/// The replication port's mandatory first exchange. It happens before any cluster frame is
+/// decompressed, and every internode dialer goes through it (`CeleriantClient::connect_with_timeout_tls`).
+async fn agree_dictionary<R: ReplicationClient + 'static, D: S3Downloader + 'static, S: LeaseStore + 'static>(
+    tcp_stream: &mut TcpStream,
+    trailing: Vec<u8>,
+    ctx: &ConnectionContext<R, D, S>,
+    peer_addr: &str,
+) -> Option<DictAgreed> {
+    let peer = read_with_timeout(ctx.config.slow_client_timeout, ctx.current_shard_id, "dictionary hello", async {
+        let mut reader = PrefixedReader::new(trailing, tcp_stream);
+        let hello = read_dict_hello(&mut reader, DICT_HELLO_REQUEST_TYPE_ID).await?;
+        // The dialer waits for our answer, so nothing may follow its hello yet.
+        if !reader.prefix_drained() {
+            return Err(ReadWireDataError::ReadBodyFailure(WireError::MalformedFrame(
+                "replication peer sent frames before the dictionary hello was answered".into(),
+            )));
+        }
+        Ok(hello)
+    }).await?;
+
+    let local = *ctx.dict_codec.sha256();
+    // Answered either way, so the dialer can name both shas too.
+    let answer = DictHello { dict_sha256: local };
+    let written = glommio::timer::timeout(ctx.config.slow_client_timeout, async {
+        Ok(write_dict_hello(tcp_stream, &answer, DICT_HELLO_RESPONSE_TYPE_ID).await)
+    }).await;
+    if !matches!(written, Ok(Ok(()))) {
+        return None;
+    }
+
+    match check_dict_agreement(&local, &peer) {
+        Ok(()) => Some(DictAgreed(())),
+        Err(mismatch) => {
+            metrics::counter!("celeriant_internode_dictionary_mismatch_total",
+                &[("shard_id", ctx.current_shard_id.to_string()), ("role", "acceptor".to_string())]).increment(1);
+            error!(
+                shard_id = ctx.current_shard_id,
+                peer = %peer_addr,
+                local_sha = %Sha256Hex(mismatch.local_sha256),
+                peer_sha = %Sha256Hex(mismatch.peer_sha256),
+                "Refusing replication connection: the peer compresses with a different dictionary"
+            );
+            None
+        }
+    }
+}
+
 async fn read_cluster_request<R: ReplicationClient + 'static, D: S3Downloader + 'static, S: LeaseStore + 'static>(
     tcp_stream: &mut TcpStream,
     ctx: &ConnectionContext<R, D, S>,
+    _agreed: &DictAgreed,
 ) -> Option<(ClusterRequest, u32)> {
     // No application-level timeout for cluster (replication) connections.
     // Liveness is handled by the heartbeat TTL mechanism and TCP keepalive
@@ -1083,6 +1150,10 @@ impl<'a> PrefixedReader<'a> {
     fn new(prefix: Vec<u8>, inner: &'a mut TcpStream) -> Self {
         Self { prefix, prefix_pos: 0, inner }
     }
+
+    fn prefix_drained(&self) -> bool {
+        self.prefix_pos == self.prefix.len()
+    }
 }
 
 impl AsyncRead for PrefixedReader<'_> {
@@ -1112,32 +1183,14 @@ async fn read_first_message_from<Rd: futures_lite::AsyncReadExt + Unpin, R: Repl
             let req = read_identify_request(header, reader).await?;
             Ok(FirstMessage::Identify(req, version))
         } else {
-            let req = ClientRequest::read_from_header(header, reader, &ctx.dict_codec).await?;
-            Ok(FirstMessage::ClientRequest(req, version))
+            // Body discarded unparsed so the close is a FIN: unread bytes would make
+            // it a RST that can discard the ProtocolError reply before the client reads it.
+            let body = futures_lite::AsyncReadExt::take(&mut *reader, header.compressed_length as u64);
+            futures_lite::io::copy(body, futures_lite::io::sink()).await
+                .map_err(|e| ReadWireDataError::ReadBodyFailure(WireError::NetworkError(e)))?;
+            Ok(FirstMessage::NotIdentify(version))
         }
     }).await
-}
-
-async fn read_cluster_request_from<Rd: futures_lite::AsyncReadExt + Unpin, R: ReplicationClient + 'static, D: S3Downloader + 'static, S: LeaseStore + 'static>(
-    reader: &mut Rd,
-    ctx: &ConnectionContext<R, D, S>,
-) -> Option<(ClusterRequest, u32)> {
-    let result: Result<(ClusterRequest, u32), ReadWireDataError> = async {
-        let header = WireHeader::from_reader(reader, ctx.config.internode_max_request_size).await
-            .map_err(ReadWireDataError::ReadHeaderFailure)?;
-        let version = header.version;
-        let req = ClusterRequest::read_from_header(header, reader, &ctx.dict_codec).await?;
-        Ok((req, version))
-    }.await;
-    match result {
-        Ok(r) => Some(r),
-        Err(ReadWireDataError::ReadHeaderFailure(WireError::NetworkError(ref e)))
-            if e.kind() == std::io::ErrorKind::UnexpectedEof => None,
-        Err(e) => {
-            warn!(shard = ctx.current_shard_id, "Failed to read cluster request: {e:?}");
-            None
-        }
-    }
 }
 
 async fn write_client_response_with_timeout(
@@ -2729,6 +2782,59 @@ mod tests {
             Err(ClientResponse::GenericError(ErrorResponse { error_code: error_codes::IDENTIFY_INVALID_SIGNATURE, .. }))
         ), "{result:?}");
         assert_eq!(conn_state.verified_client_id, None);
+    }
+
+    /// The flag demands a verified key pair and a keys file demands a valid API
+    /// key. Neither satisfies the other; when both fail, identity is reported.
+    #[test]
+    fn identify_enforces_flag_and_keys_file_independently() {
+        use base64::Engine;
+        use celeriant_crypto::{Crypto, hash_api_key};
+        use super::super::shard_config::ApiKeyHashes;
+
+        let keypair = Crypto::generate_keypair(None).unwrap();
+        let (rw, ro, unissued) = ([7u8; 32], [8u8; 32], [9u8; 32]);
+        let b64 = |k: &[u8; 32]| base64::engine::general_purpose::STANDARD.encode(k);
+
+        // (row, flag, keys file, key pair, api key, expected error code)
+        let cases = [
+            ("flag, empty", true, false, false, None, Some(error_codes::IDENTIFY_REQUIRED)),
+            ("flag, key pair", true, false, true, None, None),
+            ("flag+keys, api key only", true, true, false, Some(rw), Some(error_codes::IDENTIFY_REQUIRED)),
+            ("flag+keys, key pair only", true, true, true, None, Some(error_codes::AUTH_REQUIRED)),
+            ("flag+keys, both", true, true, true, Some(rw), None),
+            ("flag+keys, neither", true, true, false, None, Some(error_codes::IDENTIFY_REQUIRED)),
+            ("keys, empty", false, true, false, None, Some(error_codes::AUTH_REQUIRED)),
+            ("keys, api key", false, true, false, Some(rw), None),
+            ("keys, unissued key", false, true, false, Some(unissued), Some(error_codes::AUTH_INVALID_KEY)),
+            ("plain, empty", false, false, false, None, None),
+            ("plain, unissued key", false, false, false, Some(unissued), Some(error_codes::AUTH_INVALID_KEY)),
+            ("flag, key pair + unissued key", true, false, true, Some(unissued), Some(error_codes::AUTH_INVALID_KEY)),
+        ];
+
+        for (row, flag, keys_file, key_pair, api_key, expected) in cases {
+            let mut cfg = test_config(1, crate::RoutingRule::AggregateId);
+            cfg.require_client_identity = flag;
+            if keys_file {
+                let hashes = ApiKeyHashes { read_write: [hash_api_key(&rw); 2], read_only: [hash_api_key(&ro); 2] };
+                *cfg.api_key_hashes.borrow_mut() = Some(std::sync::Arc::new(hashes));
+            }
+            let mut req = base_identify_request();
+            if key_pair {
+                let nonce = Crypto::generate_nonce().unwrap();
+                req.signature = Some(Crypto::sign_nonce(&keypair.private_key_base64, &nonce).unwrap());
+                req.public_key = Some(keypair.public_key_base64.clone());
+                req.nonce = Some(nonce);
+            }
+            req.api_key = api_key.as_ref().map(b64);
+            let mut conn_state = ConnectionState { verified_client_id: None, access_level: None, client_has_dict: false };
+
+            let got = super::handle_identify(&req, &mut conn_state, &cfg).err().map(|response| match response {
+                ClientResponse::GenericError(e) => e.error_code,
+                other => panic!("{row}: {other:?}"),
+            });
+            assert_eq!(got, expected, "{row}");
+        }
     }
 
 }

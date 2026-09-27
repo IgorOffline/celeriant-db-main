@@ -1,5 +1,7 @@
 use std::cell::RefCell;
 
+use sha2::{Digest, Sha256};
+
 #[derive(Debug, Clone)]
 pub enum CompressionError {
     ZstdDict(String),
@@ -20,6 +22,7 @@ impl std::error::Error for CompressionError {}
 pub struct DictCodec {
     compressor: RefCell<zstd::bulk::Compressor<'static>>,
     decompressor: RefCell<zstd::bulk::Decompressor<'static>>,
+    sha256: [u8; 32],
 }
 
 impl DictCodec {
@@ -31,7 +34,13 @@ impl DictCodec {
         Ok(Self {
             compressor: RefCell::new(compressor),
             decompressor: RefCell::new(decompressor),
+            sha256: Sha256::digest(dict).into(),
         })
+    }
+
+    /// Sha256 of the dictionary this codec compresses with. Two codecs interoperate only when these match.
+    pub fn sha256(&self) -> &[u8; 32] {
+        &self.sha256
     }
 
     pub fn compress(&self, data: &[u8]) -> Result<Vec<u8>, CompressionError> {
@@ -46,6 +55,16 @@ impl DictCodec {
             .borrow_mut()
             .decompress(data, uncompressed_size)
             .map_err(|e| CompressionError::ZstdDict(e.to_string()))
+    }
+}
+
+/// Lowercase hex, the form `server_meta.toml` pins as `dictionary_sha256`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Sha256Hex(pub [u8; 32]);
+
+impl std::fmt::Display for Sha256Hex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.iter().try_for_each(|b| write!(f, "{b:02x}"))
     }
 }
 
@@ -73,6 +92,23 @@ pub fn decompress_with_dict(
 mod tests {
     use super::*;
     use celeriant_wal::builtin_dict::BUILTIN_DICT_BYTES;
+
+    #[test]
+    fn codec_sha_is_the_sha_of_its_dictionary() {
+        let a = DictCodec::new(BUILTIN_DICT_BYTES, 3).unwrap();
+        let b = DictCodec::new(&BUILTIN_DICT_BYTES[..BUILTIN_DICT_BYTES.len() - 1], 3).unwrap();
+        assert_eq!(a.sha256(), &<[u8; 32]>::from(Sha256::digest(BUILTIN_DICT_BYTES)));
+        assert_ne!(a.sha256(), b.sha256());
+    }
+
+    #[test]
+    fn sha_hex_is_lowercase_hex() {
+        let sha: [u8; 32] = Sha256::digest(b"abc").into();
+        assert_eq!(
+            Sha256Hex(sha).to_string(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
 
     #[test]
     fn compress_with_dict_roundtrip() {

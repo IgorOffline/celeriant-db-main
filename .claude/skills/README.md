@@ -2,13 +2,13 @@
 
 Skills the agent loads while working in this repo. Each is a directory holding a `SKILL.md` with `name` and `description` frontmatter. Only the name and description are preloaded; the body loads when the skill is invoked, so every line in a body is a recurring context cost.
 
-Twelve skills in four groups. Four of them form a connected refactoring set; the rest are standalone and entered directly.
+Thirteen skills in four groups. Four of them form a connected refactoring set; the rest are standalone and entered directly.
 
 ## Groups
 
 | Group | Skills | Entered by |
 |---|---|---|
-| Refactoring and API design | `extract-a-type`, `defaults-and-breakage`, `type-enforced-ordering`, `data-ownership` | `extract-a-type` from a cold prompt, the rest by routing |
+| Refactoring and API design | `extract-a-type`, `defaults-and-breakage`, `type-enforced-ordering`, `data-ownership`, `named-arguments` | `extract-a-type` from a cold prompt, `named-arguments` directly, the rest by routing |
 | House conventions | `error-handling`, `testing`, `glommio-locking-patterns` | Directly, or routed from `extract-a-type` |
 | Codebase knowledge | `understanding-celeriant-structure`, `database-architecture`, `client-server-protocol` | Directly |
 | Investigation tooling | `chaos-iter`, `wal-inspect-aggs` | Directly, during an investigation |
@@ -24,6 +24,7 @@ flowchart TD
         DAB["defaults-and-breakage"]
         TEO["type-enforced-ordering"]
         DOW["data-ownership"]
+        NA["named-arguments"]
     end
 
     subgraph conventions["House conventions"]
@@ -61,6 +62,7 @@ flowchart TD
     SPL --> GLP
 
     DOW --> PD
+    NA --> DAB
 ```
 
 Every arrow is a real reference in a skill body. The knowledge and tooling groups have no arrows because nothing routes to them; they are loaded when the task calls for them.
@@ -79,6 +81,8 @@ Two subskills under `references/`, loaded only when that decision comes up:
 **`type-enforced-ordering`** moves a call-order or cleanup rule from a doc comment into the type system. Receipt tokens, typestate, RAII guards, and when a typed runtime error is the right answer instead.
 
 **`data-ownership`** chooses how a function gets its data. Passing dependencies rather than reaching for globals, borrowing within an operation versus storing a borrow, and the owned / shared-pointer / handle options when a struct would otherwise hold a reference.
+
+**`named-arguments`** reshapes a signature that leans on positional args. Structs for swappable same-typed params, explicit `Option` fields for optional ones, `From` for terse conversions, enums over bools, trait bounds over overloads, builders as a last resort, slices over variadics.
 
 ## House conventions
 

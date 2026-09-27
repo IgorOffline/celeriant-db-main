@@ -26,7 +26,6 @@ use celeriant_wal::{
 use celeriant_wire::network::wire_header::PROTOCOL_VERSION_V4;
 use tokio::net::TcpStream;
 use tokio::time::{sleep, timeout};
-use tokio_util::compat::TokioAsyncReadCompatExt;
 
 const CLIENT_ID: u128 = 12345;
 /// `AggregateWatchEvent::DELETE` in celeriant_watch.
@@ -167,11 +166,7 @@ struct WatchConnection {
 
 impl WatchConnection {
     async fn connect(address: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let stream = TcpStream::connect(address).await?;
-        stream.set_nodelay(true)?;
-        Ok(Self {
-            stream: stream.compat(),
-        })
+        Ok(Self { stream: crate::common::raw_identified(address, PROTOCOL_VERSION_V4).await? })
     }
 
     async fn send_watch_request(

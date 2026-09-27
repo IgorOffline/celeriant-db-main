@@ -522,7 +522,7 @@ pub struct ServerConfig {
         long,
         action = clap::ArgAction::SetTrue,
         env = "CELERIANT_REQUIRE_CLIENT_IDENTITY",
-        help = "Require clients to send an IdentifyRequest as their first message"
+        help = "Require a verified client key pair in the Identify request"
     )]
     pub require_client_identity: bool,
 

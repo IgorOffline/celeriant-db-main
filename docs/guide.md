@@ -142,7 +142,12 @@ let tls = ClientTlsConfig::from_paths(
 
 ## Client identity
 
-When the server has `require_client_identity` enabled, the first message on a connection must be an Identify request. Two authentication modes, both sent via the same Identify message:
+Every connection opens with an Identify request; the client libraries send one automatically. Credentials in it are needed only when the server asks for them, and the two controls are independent:
+
+- `require_client_identity` requires a verified RSA key pair. An API key does not satisfy it (`IDENTIFY_REQUIRED`, 10004).
+- An `api_keys.toml` requires a valid API key. A key pair does not satisfy it (`AUTH_REQUIRED`, 10005). An API key sent to a server with no keys file is rejected (`AUTH_INVALID_KEY`, 10006).
+
+When both are missing, `IDENTIFY_REQUIRED` is reported. A rejected Identify closes the connection.
 
 ### API key
 
@@ -220,7 +225,7 @@ For raw `Vec<u8>` payloads (protobuf wire format, pre-serialized data), set `eve
 
 Every write carries a `client_id: u128` that identifies the writing service. Celeriant uses it for exactly-once tracking: the highest `client_seq` is tracked per `(aggregate_key, client_id)`.
 
-When client identity is enabled on the server, the write `client_id` must match the `client_id` derived from your Identify handshake. The server enforces this on every write, delete, trim, and schema request. A mismatch is rejected with `IDENTIFY_MISMATCH`. So your RSA-derived identity or API key identity IS your write client_id. See the [RSA key pair](#rsa-key-pair) section for how to derive it with `Crypto::generate_short_client_identity`.
+When client identity is enabled on the server, the write `client_id` must match the `client_id` derived from your Identify handshake. The server enforces this on every write, delete, trim, and schema request. A mismatch is rejected with `IDENTIFY_MISMATCH`. So your RSA-derived identity IS your write client_id. An API key grants access, not identity, and leaves `client_id` unchecked. See the [RSA key pair](#rsa-key-pair) section for how to derive it with `Crypto::generate_short_client_identity`.
 
 When identity is not enabled, `client_id` is self-declared. Generate a deterministic one from your service name so it's stable across restarts:
 
@@ -547,7 +552,11 @@ let options = ListOptions {
 
 ## Compression
 
-Wire compression is automatic and transparent. Payloads of 1KB or more are compressed with dictionary Zstd; smaller payloads go uncompressed, where compression costs more than it saves. The dictionary is exchanged during the Identify handshake, so identified connections get better ratios on small structured events than a plain compressor would.
+Wire compression is automatic and transparent. Payloads of 1KB or more are compressed with dictionary Zstd; smaller payloads go uncompressed, where compression costs more than it saves. The dictionary is exchanged during the Identify handshake, so every connection gets better ratios on small structured events than a plain compressor would.
+
+Clients start with the built-in dictionary, so a server running it ships nothing. A server with a custom dictionary ships it once per pool, and the pool shares it across connections and watches. The handshake reads under its own 1 MiB-based limit, so a small `max_response_size` never blocks it. `celeriant_identify_dictionary_bytes_shipped_total` on the server shows what was shipped.
+
+On the server, a custom `dictionary.zstd_dict` must be at most 1 MiB, or the server refuses to start. Every node in a cluster must hold the same dictionary: replication connections compare dictionary shas first and refuse a mismatch, counted in `celeriant_internode_dictionary_mismatch_total`. Keep `wal_compression_level` the same on every node too.
 
 There is nothing to configure on the client. Write your events, read them back; the wire handles it.
 

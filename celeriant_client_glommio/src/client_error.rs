@@ -1,5 +1,5 @@
 use celeriant_ktls::KtlsError;
-use celeriant_msg::{read_wire_data_error::ReadWireDataError, response::responses::ErrorResponse};
+use celeriant_msg::{process_dict_hello::DictMismatch, read_wire_data_error::ReadWireDataError, response::responses::ErrorResponse};
 use celeriant_wire::network::wire_error::WireError;
 
 #[derive(Debug)]
@@ -15,6 +15,7 @@ pub enum ClientError {
     CeleriantError(ErrorResponse),
     WriteRequestError(WireError),
     ReadResponseError(ReadWireDataError),
+    DictionaryMismatch(DictMismatch),
 }
 
 impl ClientError {

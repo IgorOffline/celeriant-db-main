@@ -1,4 +1,5 @@
 pub mod client_error;
+mod dict_cache;
 pub mod celeriant_client;
 pub mod client_operations;
 pub mod event_helpers;

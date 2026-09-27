@@ -7,7 +7,17 @@ These assignments are frozen for the coordinated breaking server, Rust, .NET and
 | 4 | Bincode, existing fixed-width little-endian configuration |
 | 5 | MessagePack, existing array representation |
 
-Every other version is rejected before execution. The opening Identify exchange validates the version; the authentication-disabled direct-request path validates before executing its first operation. Connections pin their opening version and reject changes. Clients complete a version-checked handshake before sending mutations, including after reconnect or pool expansion. There is no downgrade.
+Every other version is rejected before execution. Every client connection opens with an Identify, whatever the server requires, and the exchange validates the version. Any other first frame gets a `ProtocolError` response (type 6) and the connection closes. Connections pin their opening version and reject changes. Clients complete a version-checked handshake before sending mutations, including after reconnect or pool expansion. There is no downgrade.
+
+The Identify request carries `known_dict_sha256`. The response carries the server's `compression_dict_sha256`, plus `compression_dict_bytes` only when the shas differ. Clients seed with the built-in dictionary's sha, so a built-in server never ships bytes. The dictionary ceiling is 1 MiB (1,048,576 bytes), and the handshake has its own read limit, independent of the caller's response cap:
+
+| Handshake read | Limit |
+| --- | --- |
+| V4 IdentifyResponse, client read | ceiling + 128 |
+| V5 IdentifyResponse, server write | 2 × ceiling + 128 (MessagePack encodes the dictionary as an integer array; a byte ≥ 0x80 takes 2 bytes) |
+| Non-Identify reply to an Identify | min(caller cap, the Identify limit), checked from the header before any body read |
+
+Data frames stay under the caller's cap.
 
 | Response type ID | Body fields, in order |
 | --- | --- |

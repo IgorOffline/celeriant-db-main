@@ -1579,6 +1579,7 @@ async fn handle_intrashard_message<R: ReplicationClient + 'static, D: S3Download
             accepted_tcp_stream,
             request,
             message_version,
+            agreed,
         } => {
             handle_redirected_cluster_connection(
                 accepted_tcp_stream.bind_to_executor(),
@@ -1586,6 +1587,7 @@ async fn handle_intrashard_message<R: ReplicationClient + 'static, D: S3Download
                 ctx.config.max_response_size,
                 message_version,
                 ctx.clone(),
+                agreed,
             );
         }
         IntrashardMessages::ExtensionConnectionRedirect { accepted_tcp_stream, payload } => {

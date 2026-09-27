@@ -5,19 +5,18 @@ use std::time::{Duration, Instant};
 use celeriant_client_tokio::{CeleriantClient, ClientError, DeleteError, ReadError, ServerError, WriteError, WriteEventsOptions};
 use celeriant_msg::process_client_requests::ClientRequest;
 use celeriant_msg::process_client_responses::ClientResponse;
-use celeriant_msg::process_identify::{read_identify_response, write_identify_request};
 use celeriant_msg::request::read_filters::ReadFilters;
 use celeriant_msg::request::requests::{
-    AggregateDetailsRequest, DeleteRequest, IdentifyRequest, ReadRequest, SingleAggregateDelete, SingleAggregateWrite, WriteRequest,
+    AggregateDetailsRequest, DeleteRequest, ReadRequest, SingleAggregateDelete, SingleAggregateWrite, WriteRequest,
 };
 use celeriant_msg::response::responses::AggregateConflict;
 use celeriant_wal::aggregate_key::AggregateKey;
 use celeriant_wal::datablocks::datablock_aggregate_event::DatablockAggregateEvent;
 use celeriant_wire::network::wire_header::WireHeader;
 use tokio::net::TcpStream;
-use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
+use tokio_util::compat::Compat;
 
-use crate::common::{R, event, port_for, read_all_from};
+use crate::common::{R, event, port_for, raw_identified, read_all_from};
 use crate::{MinioContainer, ServerConfig, TestServer, is_leader, s3_cluster_config};
 
 const CLIENT: u128 = 7001;
@@ -222,28 +221,6 @@ async fn wait_snapshot(address: &str, history: &History, expected: &[Vec<u8>]) -
     }
 }
 
-async fn raw_connect(address: &str, version: u32) -> Result<Compat<TcpStream>, Box<dyn Error>> {
-    let mut stream = TcpStream::connect(address).await?.compat();
-    let request = IdentifyRequest {
-        correlation_id: Some(900),
-        public_key: None,
-        nonce: None,
-        signature: None,
-        api_key: None,
-        known_dict_sha256: None,
-    };
-    write_identify_request(&mut stream, &request, version)
-        .await
-        .map_err(|e| format!("wire: {e:?}"))?;
-    let header = tokio::time::timeout(DEADLINE, WireHeader::from_reader(&mut stream, MAX))
-        .await?
-        .map_err(|e| format!("header: {e:?}"))?;
-    assert_eq!(header.version, version);
-    let response = read_identify_response(header, &mut stream).await.map_err(|e| format!("wire: {e:?}"))?;
-    assert_eq!(response.correlation_id, request.correlation_id);
-    Ok(stream)
-}
-
 async fn exchange(stream: &mut Compat<TcpStream>, request: ClientRequest, version: u32) -> Result<ClientResponse, Box<dyn Error>> {
     ClientRequest::write_request(stream, &request, MAX, version)
         .await
@@ -261,7 +238,7 @@ async fn exchange(stream: &mut Compat<TcpStream>, request: ClientRequest, versio
 
 async fn wire_contract(address: &str, history: &mut History, conflicts: &[AggregateConflict]) -> R {
     for version in [4, 5] {
-        let mut stream = raw_connect(address, version).await?;
+        let mut stream = raw_identified(address, version).await?;
         let entries = conflicts.iter().map(|c| (c.key.clone(), guard(c.expected)));
         match exchange(&mut stream, ClientRequest::Write(write(entries)), version).await? {
             ClientResponse::WriteConflict(response) => assert_eq!(response.conflicts, conflicts),
@@ -290,7 +267,7 @@ async fn wire_contract(address: &str, history: &mut History, conflicts: &[Aggreg
             events: vec![event],
         });
     }
-    let mut stream = raw_connect(address, 4).await?;
+    let mut stream = raw_identified(address, 4).await?;
     let key = key(906);
     let request = ClientRequest::Write(write([(key.clone(), append(vec![payload("changed-version-must-not-land", 1)], None))]));
     ClientRequest::write_request(&mut stream, &request, MAX, 5)

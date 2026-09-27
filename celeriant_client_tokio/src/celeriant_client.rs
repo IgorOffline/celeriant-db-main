@@ -23,6 +23,7 @@ pub struct CachedDict {
 }
 
 use crate::client_error::ClientError;
+use crate::dict_cache::{resolve, DictCache};
 use crate::client_tls_config::ClientTlsConfig;
 
 
@@ -170,6 +171,7 @@ pub struct CeleriantClient {
     max_response_size: u64,
     timeout: Option<Duration>,
     pub(crate) current_dict: Option<CachedDict>,
+    dict_cache: DictCache,
     stream_dirty: bool,
     protocol_checked: bool,
     next_correlation_id: u128,
@@ -203,6 +205,7 @@ impl CeleriantClient {
             max_response_size: 64 * 1024 * 1024, // 64 MB; matches server default
             timeout: connection_timeout,
             current_dict: None,
+            dict_cache: DictCache::default(),
             stream_dirty: false,
             protocol_checked: false,
             next_correlation_id: 1,
@@ -218,6 +221,12 @@ impl CeleriantClient {
     /// Set maximum response size in bytes (default: 64 MB)
     pub fn with_max_response_size(mut self, max_response_size: u64) -> Self {
         self.max_response_size = max_response_size;
+        self
+    }
+
+    /// Share `dict_cache` with other connections, so a dictionary learned on one is advertised by all.
+    pub(crate) fn with_dict_cache(mut self, dict_cache: DictCache) -> Self {
+        self.dict_cache = dict_cache;
         self
     }
 
@@ -470,8 +479,8 @@ impl CeleriantClient {
     /// Perform client identity verification handshake, optionally advertising a
     /// previously cached dict sha so the server can skip re-sending the bytes.
     ///
-    /// `known_dict_sha` should be `None` on the very first connection and the sha
-    /// from `current_dict` on subsequent ones (supplied by the pool).
+    /// `identify` supplies both from the client's dict cache; call this directly
+    /// only to choose the advertised sha and the lookup yourself.
     pub async fn identify_with_known_sha(
         &mut self,
         identity_config: &ClientIdentityConfig,
@@ -500,12 +509,12 @@ impl CeleriantClient {
         };
 
         self.stream_dirty = true;
-        let stream = &mut self.stream;
         let max_response_size = self.max_response_size;
+        let stream = &mut self.stream;
         let identify_inner = async move {
             write_identify_request(stream, &req, PROTOCOL_VERSION_V4).await?;
 
-            let header = WireHeader::from_reader(stream, max_response_size).await?;
+            let header = crate::tokio_wire::read_identify_header(stream, max_response_size).await?;
             if header.version != PROTOCOL_VERSION_V4 {
                 return Err(ClientError::ProtocolError);
             }
@@ -539,14 +548,14 @@ impl CeleriantClient {
 
         // Resolve the dict for this connection:
         //   - If server shipped bytes -> store them (new or refreshed dict).
-        //   - If server sent sha only (client already has it) -> look up from pool cache.
+        //   - If server sent sha only (client already has it) -> look up from the dict cache.
         //   - If neither -> no dict (cluster not using ZstdDict).
         self.current_dict = match (resp.compression_dict_sha256, resp.compression_dict_bytes) {
             (Some(sha), Some(bytes)) => {
                 Some(CachedDict { sha, bytes: Arc::from(bytes.into_boxed_slice()) })
             }
             (Some(sha), None) => match dict_lookup(&sha) {
-                // Server confirmed sha match; retrieve bytes from pool cache.
+                // Server confirmed sha match; retrieve bytes from the dict cache.
                 Some(bytes) => Some(CachedDict { sha, bytes }),
                 // The frame boundary is clean but the negotiated state is not:
                 // retire the connection so the pool discards rather than reuses it.
@@ -562,9 +571,16 @@ impl CeleriantClient {
         Ok(resp.client_id)
     }
 
+    /// Identify, advertising the sha this client's dict cache holds and teaching the cache whatever the server ships.
     pub async fn identify(&mut self, identity_config: &ClientIdentityConfig) -> Result<Option<u128>, ClientError> {
-        // No pool → no cached sha, no dict lookup.
-        self.identify_with_known_sha(identity_config, None, |_| None).await
+        let advertised = self.dict_cache.snapshot();
+        let client_id = self
+            .identify_with_known_sha(identity_config, Some(advertised.sha.clone()), |sha| resolve(&advertised, sha))
+            .await?;
+        if let Some(dict) = &self.current_dict {
+            self.dict_cache.learn(dict);
+        }
+        Ok(client_id)
     }
 }
 
@@ -688,6 +704,18 @@ mod tests {
             client.is_stream_dirty(),
             "the connection must be discarded, not returned to the pool"
         );
+    }
+
+    #[tokio::test]
+    async fn a_fresh_client_on_a_builtin_server_is_not_shipped_the_dict() {
+        use celeriant_wal::builtin_dict::BUILTIN_DICT_BYTES;
+        let (addr, advertised) = crate::test_support::dict_shipping_server(BUILTIN_DICT_BYTES).await;
+        let mut client = CeleriantClient::connect(&addr.to_string()).await.unwrap();
+
+        client.identify(&ClientIdentityConfig { public_key: None, private_key: None, api_key: None }).await.unwrap();
+
+        assert_eq!(*advertised.lock().unwrap(), [Some(celeriant_crypto::sha256_hex(BUILTIN_DICT_BYTES))]);
+        assert_eq!(client.current_dict.as_ref().map(|d| &*d.bytes), Some(BUILTIN_DICT_BYTES));
     }
 
     #[test]

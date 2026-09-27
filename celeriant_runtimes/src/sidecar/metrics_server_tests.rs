@@ -112,6 +112,7 @@ fn recorded_metrics_have_descriptions() {
         "celeriant_tls_handshake_seconds",
         "celeriant_tls_handshake_failures_total",
         "celeriant_tls_handshakes_in_flight",
+        "celeriant_identify_dictionary_bytes_shipped_total",
     ];
 
     for name in recorded {

@@ -1,7 +1,9 @@
+use celeriant_wal::builtin_dict::DICTIONARY_CEILING_BYTES;
 use celeriant_wire::network::{
     wire_error::WireError,
     wire_header::{
-        WireHeader, wire_header_write_fixed_size, wire_header_write_variable_size_uncompressed,
+        PROTOCOL_VERSION_V5, WireHeader, wire_header_write_fixed_size,
+        wire_header_write_variable_size_uncompressed,
     },
 };
 use futures_lite::{AsyncReadExt, AsyncWriteExt};
@@ -14,6 +16,23 @@ use crate::{
 
 pub const IDENTIFY_REQUEST_TYPE_ID: u32 = 14;
 pub const IDENTIFY_RESPONSE_TYPE_ID: u32 = 16;
+
+/// Everything in a maximal IdentifyResponse except the dictionary. V4 bincode (fixed ints): two `Option<u128>`
+/// at 17 each, `Option<AccessLevel>` at 5, the 64-char hex sha at 73 and the dict's tag and length at 9,
+/// 121 in all. V5 msgpack spends 109 on top of its doubled dictionary. Pinned by
+/// `maximal_response_fits_the_limit`.
+const IDENTIFY_RESPONSE_ALLOWANCE_BYTES: u64 = 128;
+
+/// V4 IdentifyResponse body limit. Rust clients read the handshake under it, not under their response cap.
+pub const IDENTIFY_RESPONSE_MAX_BYTES: u64 = DICTIONARY_CEILING_BYTES as u64 + IDENTIFY_RESPONSE_ALLOWANCE_BYTES;
+
+/// msgpack encodes the dict `Vec<u8>` as an int array, where a byte >= 0x80 costs two bytes.
+fn identify_response_max_bytes(version: u32) -> u64 {
+    match version {
+        PROTOCOL_VERSION_V5 => 2 * DICTIONARY_CEILING_BYTES as u64 + IDENTIFY_RESPONSE_ALLOWANCE_BYTES,
+        _ => IDENTIFY_RESPONSE_MAX_BYTES,
+    }
+}
 
 pub async fn read_identify_request<R>(header: WireHeader, reader: &mut R) -> Result<IdentifyRequest, ReadWireDataError>
 where
@@ -47,7 +66,7 @@ where
         writer,
         res,
         IDENTIFY_RESPONSE_TYPE_ID,
-        64 * 1024 * 1024,
+        identify_response_max_bytes(version),
         version,
     )
     .await
@@ -228,6 +247,25 @@ mod tests {
                 let parsed = roundtrip_response(&res, version).await;
                 assert_eq!(parsed.compression_dict_sha256, None);
                 assert_eq!(parsed.compression_dict_bytes, None);
+            }
+        });
+    }
+
+    #[test]
+    fn maximal_response_fits_the_limit() {
+        block_on(async {
+            let res = IdentifyResponse {
+                correlation_id: Some(u128::MAX),
+                client_id: Some(u128::MAX),
+                access_level: Some(AccessLevel::ReadOnly),
+                compression_dict_sha256: Some("f".repeat(64)),
+                compression_dict_bytes: Some(vec![0xFF; DICTIONARY_CEILING_BYTES]),
+            };
+            for &version in &[PROTOCOL_VERSION_V4, PROTOCOL_VERSION_V5] {
+                let mut buf = Vec::new();
+                write_identify_response(&mut buf, &res, version).await.unwrap();
+                let body = (buf.len() - WIRE_HEADER_SIZE) as u64;
+                assert!(body <= identify_response_max_bytes(version), "v{version}: {body} bytes");
             }
         });
     }

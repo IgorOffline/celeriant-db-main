@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use celeriant_ktls::ktls_connect;
 use celeriant_msg::process_cluster_requests::ClusterRequest;
+use celeriant_msg::process_dict_hello::{DICT_HELLO_REQUEST_TYPE_ID, DICT_HELLO_RESPONSE_TYPE_ID, DictHello, check_dict_agreement, read_dict_hello, write_dict_hello};
 use celeriant_msg::process_cluster_responses::ClusterResponse;
 use celeriant_wal::compression_type::CompressionType;
 use celeriant_wire::codec::compression::DictCodec;
@@ -88,6 +89,31 @@ mod tests {
     }
 }
 
+async fn bounded<T>(timeout: Option<Duration>, fut: impl Future<Output = T>) -> Result<T, ClientError> {
+    match timeout {
+        Some(duration) => or(async { Some(fut.await) }, async {
+            Timer::new(duration).await;
+            None
+        })
+        .await
+        .ok_or(ClientError::ConnectionTimeout),
+        None => Ok(fut.await),
+    }
+}
+
+/// Runs before `connect_with_timeout_tls` returns, so no `CeleriantClient` exists, and no
+/// `ZstdDict` frame can be written, on a connection whose peer holds another dictionary.
+async fn agree_dictionary(stream: &mut TcpStream, codec: &DictCodec) -> Result<(), ClientError> {
+    let local = DictHello { dict_sha256: *codec.sha256() };
+    write_dict_hello(stream, &local, DICT_HELLO_REQUEST_TYPE_ID)
+        .await
+        .map_err(ClientError::WriteRequestError)?;
+    let peer = read_dict_hello(stream, DICT_HELLO_RESPONSE_TYPE_ID)
+        .await
+        .map_err(ClientError::ReadResponseError)?;
+    check_dict_agreement(codec.sha256(), &peer).map_err(ClientError::DictionaryMismatch)
+}
+
 pub struct CeleriantClient {
     stream: TcpStream,
     max_request_size: u64,
@@ -149,23 +175,12 @@ impl CeleriantClient {
             }
         }
 
-        let stream = match tls_config {
+        let mut stream = match tls_config {
             None => stream,
             Some(cfg) => {
                 // don't hang forever on ktls connect, timeout important
                 let handshake = ktls_connect(stream, cfg.client_config, cfg.server_name);
-                let handshake_result = match connection_timeout {
-                    Some(duration) => {
-                        or(async { Some(handshake.await) }, async {
-                            Timer::new(duration).await;
-                            None
-                        })
-                        .await
-                        .ok_or(ClientError::ConnectionTimeout)?
-                    }
-                    None => handshake.await,
-                };
-                let (stream, trailing) = handshake_result.map_err(ClientError::KtlsError)?;
+                let (stream, trailing) = bounded(connection_timeout, handshake).await?.map_err(ClientError::KtlsError)?;
                 debug_assert!(
                     trailing.is_empty(),
                     "server sent {} bytes before the client's first request; they are being dropped",
@@ -174,6 +189,8 @@ impl CeleriantClient {
                 stream
             }
         };
+
+        bounded(connection_timeout, agree_dictionary(&mut stream, &dict_codec)).await??;
 
         Ok(Self {
             stream,
@@ -303,6 +320,7 @@ impl CeleriantClient {
 #[cfg(test)]
 mod cluster_cancellation_tests {
     use super::*;
+    use celeriant_msg::read_wire_data_error::ReadWireDataError;
     use celeriant_msg::request::requests::{HeartbeatRequest, KickFollowerRequest};
     use celeriant_msg::response::responses::{HeartbeatResponse, HeartbeatResult, KickFollowerResponse};
     use celeriant_wal::builtin_dict::BUILTIN_DICT_BYTES;
@@ -365,6 +383,9 @@ mod cluster_cancellation_tests {
         let server = follower.clone();
         glommio::spawn_local(async move {
             while let Ok(mut stream) = listener.accept().await {
+                if answer_hello(&mut stream, *codec.sha256()).await.is_err() {
+                    continue;
+                }
                 loop {
                     let Ok(header) = WireHeader::from_reader(&mut stream, MAX).await else { break };
                     let Ok(request) = ClusterRequest::read_from_header(header, &mut stream, &codec).await else { break };
@@ -383,6 +404,15 @@ mod cluster_cancellation_tests {
         })
         .detach();
         (address, follower)
+    }
+
+    async fn answer_hello(stream: &mut glommio::net::TcpStream, dict_sha256: [u8; 32]) -> Result<(), ReadWireDataError> {
+        read_dict_hello(stream, DICT_HELLO_REQUEST_TYPE_ID).await?;
+        write_dict_hello(stream, &DictHello { dict_sha256 }, DICT_HELLO_RESPONSE_TYPE_ID)
+            .await
+            .map_err(ReadWireDataError::ReadBodyFailure)?;
+        let _ = stream.flush().await;
+        Ok(())
     }
 
     /// A real park, short enough to be irrelevant to any assertion. A task that
@@ -453,6 +483,30 @@ mod cluster_cancellation_tests {
             follower.answered.get() > answered_before,
             "the follower never wrote the answer to the abandoned request"
         );
+    }
+
+    #[test]
+    fn a_peer_on_another_dictionary_is_refused_before_a_client_exists() {
+        glommio_test!({
+            let listener = glommio::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap().to_string();
+            let peer_sha = [0xee; 32];
+            glommio::spawn_local(async move {
+                let mut stream = listener.accept().await.unwrap();
+                answer_hello(&mut stream, peer_sha).await.unwrap();
+            })
+            .detach();
+
+            let codec = test_codec();
+            let local_sha = *codec.sha256();
+            match CeleriantClient::connect_with_timeout_tls(&address, None, MAX, MAX, None, None, codec).await {
+                Err(ClientError::DictionaryMismatch(m)) => {
+                    assert_eq!((m.local_sha256, m.peer_sha256), (local_sha, peer_sha));
+                }
+                Err(e) => panic!("expected DictionaryMismatch, got {e:?}"),
+                Ok(_) => panic!("a client was handed out for a peer on another dictionary"),
+            }
+        });
     }
 
     /// Cross-variant crosstalk: the loud half of the bug.

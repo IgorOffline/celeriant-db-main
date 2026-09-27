@@ -48,6 +48,7 @@ serde_json.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+metrics-exporter-prometheus.workspace = true
 uuid.workspace = true
 criterion.workspace = true
 num_cpus.workspace = true

@@ -15,9 +15,9 @@ use celeriant_msg::{
 };
 use celeriant_wal::s3::fallback_batch::{FallbackBatch, FallbackItem};
 use glommio::sync::RwLock;
-use tracing::debug;
+use tracing::{debug, error};
 
-use celeriant_wire::codec::compression::DictCodec;
+use celeriant_wire::codec::compression::{DictCodec, Sha256Hex};
 use crate::error::{replication_to_follower_error::ReplicateToFollowerError, replication_to_s3_error::ReplicateToS3Error, send_heartbeat_error::SendHeartbeatError};
 use crate::s3_uploader::S3Uploader;
 
@@ -68,11 +68,12 @@ impl ReplicationClient for StubReplicationClient {
 struct ConnState {
     client: Option<CeleriantClient>,
     connected_to: Option<String>,
+    shard_id: u64,
 }
 
 impl ConnState {
-    fn new() -> Self {
-        Self { client: None, connected_to: None }
+    fn new(shard_id: u64) -> Self {
+        Self { client: None, connected_to: None, shard_id }
     }
 
     async fn reset(&mut self) {
@@ -125,7 +126,20 @@ impl ConnState {
                 tcp_user_timeout,
                 dict_codec,
             )
-            .await?;
+            .await
+            .inspect_err(|e| {
+                if let ClientError::DictionaryMismatch(m) = e {
+                    metrics::counter!("celeriant_internode_dictionary_mismatch_total",
+                        &[("shard_id", self.shard_id.to_string()), ("role", "dialer".to_string())]).increment(1);
+                    error!(
+                        shard_id = self.shard_id,
+                        addr,
+                        local_sha = %Sha256Hex(m.local_sha256),
+                        peer_sha = %Sha256Hex(m.peer_sha256),
+                        "Peer refused: it compresses with a different dictionary; no replication over TCP until both nodes hold the same one"
+                    );
+                }
+            })?;
             debug!(addr, "internode: connected");
             self.client = Some(match request_timeout {
                 Some(t) => client.with_timeout(t),
@@ -180,8 +194,8 @@ impl<S: S3Uploader> FollowerConnection<S> {
             kick_in_flight: Cell::new(false),
             node_id,
             shard_id,
-            replication_conn: RwLock::new(ConnState::new()),
-            heartbeat_conn: RwLock::new(ConnState::new()),
+            replication_conn: RwLock::new(ConnState::new(shard_id)),
+            heartbeat_conn: RwLock::new(ConnState::new(shard_id)),
             connection_timeout,
             request_timeout,
             heartbeat_timeout,
@@ -786,6 +800,7 @@ mod tests {
     // variant means the same thing has already happened.
 
     use celeriant_msg::process_cluster_requests::ClusterRequestType;
+    use celeriant_msg::process_dict_hello::{DICT_HELLO_REQUEST_TYPE_ID, DICT_HELLO_RESPONSE_TYPE_ID, DictHello, read_dict_hello, write_dict_hello};
     use celeriant_msg::response::responses::{HeartbeatResponse, KickFollowerResponse, ReplicationBatchResponse};
     use celeriant_wire::network::wire_header::{PROTOCOL_VERSION_V4, WireHeader};
     use futures_lite::AsyncWriteExt;
@@ -905,6 +920,9 @@ mod tests {
                 let server = acceptor.clone();
                 let codec = codec.clone();
                 glommio::spawn_local(async move {
+                    if answer_hello(&mut stream, *codec.sha256()).await.is_err() {
+                        return;
+                    }
                     loop {
                         let Ok(header) = WireHeader::from_reader(&mut stream, MOCK_MAX).await else { break };
                         let Ok(request) = ClusterRequest::read_from_header(header, &mut stream, &codec).await else { break };
@@ -933,6 +951,39 @@ mod tests {
     /// the reactor only drains its io_uring completions when it does.
     async fn park_briefly() {
         glommio::timer::sleep(Duration::from_micros(50)).await;
+    }
+
+    async fn answer_hello(stream: &mut glommio::net::TcpStream, dict_sha256: [u8; 32]) -> Result<(), ()> {
+        read_dict_hello(stream, DICT_HELLO_REQUEST_TYPE_ID).await.map_err(drop)?;
+        write_dict_hello(stream, &DictHello { dict_sha256 }, DICT_HELLO_RESPONSE_TYPE_ID).await.map_err(drop)?;
+        stream.flush().await.map_err(drop)
+    }
+
+    /// A follower on another dictionary is refused at connect: no batch reaches it, the
+    /// error names both shas, and the dialer counts it.
+    #[test]
+    fn a_follower_on_another_dictionary_is_refused_and_counted() {
+        glommio_test!({
+            let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+            let _recording = metrics::set_default_local_recorder(&recorder);
+            let local = test_dict_codec();
+            let follower_codec = Rc::new(DictCodec::new(&celeriant_wal::builtin_dict::BUILTIN_DICT_BYTES[1..], 3).unwrap());
+            let (address, follower) = spawn_follower(FollowerScript::Correct, follower_codec.clone());
+            let conn = follower_conn_to(&address, local.clone());
+
+            match conn.replicate_to_follower(test_batches(), 0, 5).await {
+                Err(ReplicateToFollowerError::FollowerNetworkError(ClientError::DictionaryMismatch(m))) => {
+                    assert_eq!((&m.local_sha256, &m.peer_sha256), (local.sha256(), follower_codec.sha256()));
+                }
+                other => panic!("expected DictionaryMismatch, got {other:?}"),
+            }
+            assert_eq!(follower.requests_read(), 0, "a batch crossed a mismatched connection");
+            let rendered = recorder.handle().render();
+            assert!(
+                rendered.lines().any(|l| l.starts_with("celeriant_internode_dictionary_mismatch_total") && l.contains("role=\"dialer\"") && l.ends_with(" 1")),
+                "{rendered}"
+            );
+        });
     }
 
     fn follower_conn_to(address: &str, codec: Rc<DictCodec>) -> FollowerConnection<MockS3Uploader> {

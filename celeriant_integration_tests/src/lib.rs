@@ -17,6 +17,9 @@ pub mod invariant_schema_redirect;
 pub mod invariant_size_caps;
 pub mod invariant_watch_dial_failover;
 pub mod invariant_watch_options_enforced;
+pub mod dictionary_ceiling;
+pub mod dictionary_handshake;
+pub mod internode_dictionary;
 pub mod invariant_watch_trim_floor;
 
 pub mod api_key_test;
@@ -57,6 +60,8 @@ pub mod promotion_failure_process_survival;
 pub mod follower_notify_liveness;
 pub mod follower_read_snapshot;
 pub mod identity_test;
+pub mod identity_api_key_matrix;
+pub mod dictionary_s3_divergence;
 pub mod invariant_clock_drift_rejection;
 pub mod invariant_concurrent_write;
 pub mod invariant_held_seq_sibling_recovery;
@@ -743,6 +748,9 @@ impl ServerConfigExt for ServerConfig {
 
         args.push("--internode-request-timeout-ms".to_string());
         args.push(self.internode_request_timeout_ms.to_string());
+
+        args.push("--wal-compression-level".to_string());
+        args.push(self.wal_compression_level.to_string());
 
         args.push("--replication-delay-us".to_string());
         args.push(self.replication_delay_us.to_string());

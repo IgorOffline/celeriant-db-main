@@ -4,15 +4,18 @@ use celeriant_crypto::Crypto;
 use celeriant_msg::error_codes;
 use celeriant_msg::process_client_requests::ClientRequest;
 use celeriant_msg::process_client_responses::ClientResponse;
-use celeriant_msg::process_identify::{IDENTIFY_RESPONSE_TYPE_ID, read_identify_response, write_identify_request};
+use celeriant_msg::process_identify::{
+    IDENTIFY_RESPONSE_TYPE_ID, read_identify_response, write_identify_request,
+};
 use celeriant_msg::request::requests::{IdentifyRequest, WatchRequest};
 use celeriant_msg::response::responses::WatchResponse;
-use celeriant_wire::network::wire_header::{PROTOCOL_VERSION_V4, WireHeader};
+use celeriant_wire::network::wire_header::PROTOCOL_VERSION_V4;
 use tokio::time::{timeout, Duration};
 
 use crate::ClientTlsConfig;
 use crate::celeriant_client::{CachedDict, ClientIdentityConfig, ClientStream};
 use crate::client_error::ClientError;
+use crate::dict_cache::{resolve, DictCache};
 
 /// Options for configuring a watch connection
 #[derive(Clone)]
@@ -138,16 +141,12 @@ impl Drop for MultiShardState {
     }
 }
 
-async fn identify_stream<F>(
+async fn identify_stream(
     stream: &mut ClientStream,
     identity: &ClientIdentityConfig,
-    known_sha: Option<String>,
-    dict_lookup: F,
+    dict_cache: &DictCache,
     max_response_size: u64,
-) -> Result<Option<CachedDict>, ClientError>
-where
-    F: FnOnce(&str) -> Option<Arc<[u8]>>,
-{
+) -> Result<Option<CachedDict>, ClientError> {
     let (public_key, nonce, signature) = match (&identity.public_key, &identity.private_key) {
         (Some(pub_key), Some(priv_key)) => {
             let n = Crypto::generate_nonce()?;
@@ -157,18 +156,19 @@ where
         _ => (None, None, None),
     };
 
+    let advertised = dict_cache.snapshot();
     let req = IdentifyRequest {
         correlation_id: None,
         public_key,
         nonce,
         signature,
         api_key: identity.api_key.clone(),
-        known_dict_sha256: known_sha,
+        known_dict_sha256: Some(advertised.sha.clone()),
     };
 
     write_identify_request(stream, &req, PROTOCOL_VERSION_V4).await?;
 
-    let header = WireHeader::from_reader(stream, max_response_size).await?;
+    let header = crate::tokio_wire::read_identify_header(stream, max_response_size).await?;
     if header.version != PROTOCOL_VERSION_V4 {
         return Err(ClientError::ProtocolError);
     }
@@ -181,12 +181,15 @@ where
             (Some(sha), Some(bytes)) => {
                 Some(CachedDict { sha, bytes: Arc::from(bytes.into_boxed_slice()) })
             }
-            (Some(sha), None) => match dict_lookup(&sha) {
+            (Some(sha), None) => match resolve(&advertised, &sha) {
                 Some(bytes) => Some(CachedDict { sha, bytes }),
                 None => return Err(ClientError::DictUnavailable { sha }),
             },
             (None, _) => None,
         };
+        if let Some(dict) = &cached {
+            dict_cache.learn(dict);
+        }
         return Ok(cached);
     }
     let response = ClientResponse::read_from_header(header, stream).await?;
@@ -247,20 +250,16 @@ impl WatchConnection {
         request: WatchRequest,
         options: WatchOptions,
     ) -> Result<Self, ClientError> {
-        Self::connect_with_dict(address, request, options, None, |_| None).await
+        Self::connect_with_dict(address, request, options, &DictCache::default()).await
     }
 
-    /// Like `connect` but supplies a cached dict sha and lookup closure (used by the pool).
-    pub(crate) async fn connect_with_dict<F>(
+    /// Like `connect` but advertises from, and learns into, a shared dict cache (used by the pool).
+    pub(crate) async fn connect_with_dict(
         address: &str,
         request: WatchRequest,
         options: WatchOptions,
-        known_sha: Option<String>,
-        dict_lookup: F,
-    ) -> Result<Self, ClientError>
-    where
-        F: Fn(&str) -> Option<Arc<[u8]>> + Clone + Send + 'static,
-    {
+        dict_cache: &DictCache,
+    ) -> Result<Self, ClientError> {
         // If max_shard_hint is provided, skip probe and open N connections directly
         if let Some(max_shard) = options.max_shard_hint {
             let num_shards = max_shard.checked_add(1).ok_or(ClientError::InvalidShardRange {
@@ -272,8 +271,7 @@ impl WatchConnection {
                 &request,
                 &options,
                 num_shards,
-                known_sha,
-                dict_lookup,
+                dict_cache,
             )
             .await;
         }
@@ -289,7 +287,7 @@ impl WatchConnection {
         let (current_dict, response) = bounded(options.timeout, async {
             let unsigned = ClientIdentityConfig { public_key: None, private_key: None, api_key: None };
             let identity = options.identity_config.as_ref().unwrap_or(&unsigned);
-            let current_dict = identify_stream(&mut stream, identity, known_sha.clone(), dict_lookup.clone(), options.max_response_size).await?;
+            let current_dict = identify_stream(&mut stream, identity, dict_cache, options.max_response_size).await?;
 
             // Send initial watch request without shard_id. Watch is fixed-size — never compressed.
             ClientRequest::write_request(
@@ -361,8 +359,7 @@ impl WatchConnection {
                         &request,
                         &options,
                         shard_id,
-                        known_sha.clone(),
-                        dict_lookup.clone(),
+                        dict_cache,
                     ));
                 }
                 let results = futures_util::future::join_all(futures).await;
@@ -438,17 +435,13 @@ impl WatchConnection {
         }
     }
 
-    async fn connect_shard<F>(
+    async fn connect_shard(
         address: &str,
         request: &WatchRequest,
         options: &WatchOptions,
         shard_id: u64,
-        known_sha: Option<String>,
-        dict_lookup: F,
-    ) -> Result<ShardStream, ClientError>
-    where
-        F: FnOnce(&str) -> Option<Arc<[u8]>>,
-    {
+        dict_cache: &DictCache,
+    ) -> Result<ShardStream, ClientError> {
         let mut stream = crate::celeriant_client::connect_stream(
             address,
             options.timeout,
@@ -459,7 +452,7 @@ impl WatchConnection {
         let (current_dict, response) = bounded(options.timeout, async {
             let unsigned = ClientIdentityConfig { public_key: None, private_key: None, api_key: None };
             let identity = options.identity_config.as_ref().unwrap_or(&unsigned);
-            let current_dict = identify_stream(&mut stream, identity, known_sha, dict_lookup, options.max_response_size).await?;
+            let current_dict = identify_stream(&mut stream, identity, dict_cache, options.max_response_size).await?;
 
             let mut shard_request = request.clone();
             shard_request.shard_id = Some(shard_id);
@@ -488,17 +481,13 @@ impl WatchConnection {
         }
     }
 
-    async fn connect_multi_shard<F>(
+    async fn connect_multi_shard(
         address: &str,
         request: &WatchRequest,
         options: &WatchOptions,
         num_shards: u64,
-        known_sha: Option<String>,
-        dict_lookup: F,
-    ) -> Result<Self, ClientError>
-    where
-        F: Fn(&str) -> Option<Arc<[u8]>> + Clone + Send + 'static,
-    {
+        dict_cache: &DictCache,
+    ) -> Result<Self, ClientError> {
         let mut futures = Vec::new();
         for shard_id in options.start_shard..num_shards {
             futures.push(Self::connect_shard(
@@ -506,8 +495,7 @@ impl WatchConnection {
                 request,
                 options,
                 shard_id,
-                known_sha.clone(),
-                dict_lookup.clone(),
+                dict_cache,
             ));
         }
 
@@ -931,8 +919,7 @@ mod tests {
             &addr.to_string(),
             watch_request(),
             options,
-            Some(UNCACHED_SHA.to_string()),
-            |_| None,
+            &crate::dict_cache::DictCache::default(),
         )
         .await;
 
@@ -945,6 +932,16 @@ mod tests {
             saw_watch.try_recv().is_err(),
             "the watch request must not follow a failed handshake"
         );
+    }
+
+    #[tokio::test]
+    async fn a_standalone_watch_on_a_builtin_server_advertises_the_builtin_dict() {
+        let (addr, advertised) = crate::test_support::dict_shipping_server(BUILTIN_DICT_BYTES).await;
+        let options = WatchOptions { timeout: Some(Duration::from_secs(5)), ..WatchOptions::default() };
+
+        let _ = WatchConnection::connect(&addr.to_string(), watch_request(), options).await;
+
+        assert_eq!(*advertised.lock().unwrap(), [Some(celeriant_crypto::sha256_hex(BUILTIN_DICT_BYTES))]);
     }
 
     #[tokio::test]

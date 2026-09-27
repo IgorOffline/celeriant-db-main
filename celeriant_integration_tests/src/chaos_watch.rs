@@ -39,9 +39,7 @@ use celeriant_wal::{
 };
 use celeriant_wire::network::wire_header::PROTOCOL_VERSION_V4;
 use rand::{rngs::StdRng, Rng, SeedableRng};
-use tokio::net::TcpStream;
 use tokio::time::{sleep, Duration as TokioDuration, Instant};
-use tokio_util::compat::TokioAsyncReadCompatExt;
 
 const NUM_SHARDS: usize = 4;
 const DURATION_SECS: u64 = 15;
@@ -451,9 +449,7 @@ async fn abandoned_watcher_task(
         let key = &pool[rng.gen_range(0..pool.len())];
         let req = watch_request(Some(HashSet::from([key.aggregate_id])), None, None, None);
 
-        if let Ok(stream) = TcpStream::connect(&addr).await {
-            let _ = stream.set_nodelay(true);
-            let mut stream = stream.compat();
+        if let Ok(mut stream) = crate::common::raw_identified(&addr, PROTOCOL_VERSION_V4).await {
             let _ = ClientRequest::write_request(
                 &mut stream,
                 &ClientRequest::Watch(req),

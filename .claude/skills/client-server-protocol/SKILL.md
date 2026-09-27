@@ -21,7 +21,16 @@ Hot-reload of certs is supported via configurable interval.
 
 ## Identity & Auth
 
-Optional. When `require_client_identity` is set, the first message on a client connection must be Identify. Two modes: RSA signature (public_key + nonce + signature) or API key. Once identified, access level is stored on the connection for its lifetime.
+Identify is the mandatory first frame on every client connection, V4 and V5, whatever the server config. Any other first frame gets `ProtocolError` (response type 6) and the connection closes. Its body is discarded unparsed. Credentials in the Identify are optional unless the server requires them.
+
+Two independent controls share the Identify round trip and nothing else:
+
+- `require_client_identity` requires a verified RSA key pair (public_key + nonce + signature). An API key does not satisfy it: 10004.
+- An `api_keys.toml` requires a valid API key. A key pair does not satisfy it: 10005. An API key presented to a server with no keys file: 10006.
+
+Check order: signature (10001/10002), then the flag (10004), then API keys (10005/10006). So 10004 wins when both controls fail. Every rejected Identify closes the connection. Once identified, access level is stored on the connection for its lifetime. An API key grants access, not identity, and leaves write `client_id` unchecked.
+
+The Identify also exchanges the compression dictionary: the client advertises `known_dict_sha256` (seeded with the built-in), and the server ships bytes only on a mismatch. The dictionary ceiling is 1 MiB. Clients read the IdentifyResponse under ceiling + 128 (V4), not their response cap; the server's V5 write limit is 2 × ceiling + 128 because msgpack encodes the dictionary as an integer array. A non-Identify reply to Identify stays under the caller's cap. The server refuses to start with a larger dictionary.
 
 API keys are stored as SHA-256 hashes only, never raw. Four slots: two ReadWrite, two ReadOnly. 
 
@@ -69,8 +78,10 @@ Follower validates each batch: WAL sequence continuity, tip hash match, clock dr
 
 Heartbeats are pure liveness signals. No WAL data. Separate validation path.
 
+Every replication connection opens with a dictionary hello: type 108 from the dialer, 109 back, each an uncompressed V4 frame carrying the sender's 32-byte dictionary sha256. Nothing crosses before it, heartbeats included. A mismatch logs ERROR naming both shas, bumps `celeriant_internode_dictionary_mismatch_total`, and closes, so the pair behaves like a partition. It guards TCP only; S3 fallback/catchup is an open gap (see `docs/invariants.md`).
+
 ## Wire Format
 
-17-byte fixed header, then payload. Protocol version V4 (bincode, Rust clients and internode) or V5 (msgpack, non-Rust). Server auto-detects from the header and responds in kind. Compression optional (none, zstd, snappy, brotli, gzip).
+17-byte fixed header, then payload. Protocol version V4 (bincode, Rust clients and internode) or V5 (msgpack, non-Rust). Server auto-detects from the header and responds in kind. Compression is none (0) or dictionary zstd (1).
 
 See `celeriant_wire/src/network/wire_header.rs` for the header layout. See `celeriant_msg/src/error_codes.rs` for all error codes.

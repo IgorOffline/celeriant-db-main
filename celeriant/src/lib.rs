@@ -128,8 +128,7 @@ pub fn startup_with_extension(args: Vec<String>, extension: Option<Arc<dyn PerSh
 
     // Load dict bytes for shard executors. Happens before any port listens (Inv 4).
     let (dict_bytes, dict_sha256): (std::sync::Arc<[u8]>, std::sync::Arc<str>) = {
-        let dict_path = server_config.data_root.join("dictionary.zstd_dict");
-        match std::fs::read(&dict_path) {
+        match server_meta::load_dictionary(&server_config.data_root) {
             Ok(bytes) => {
                 let name = desired_compression.dictionary_name.as_deref().unwrap_or("(unnamed)");
                 let full_sha = {
@@ -145,7 +144,7 @@ pub fn startup_with_extension(args: Vec<String>, extension: Option<Arc<dyn PerSh
                 (arc_bytes, arc_sha)
             }
             Err(e) => {
-                error!("Failed to read dictionary.zstd_dict: {}", e);
+                error!("{e}");
                 std::process::exit(1);
             }
         }

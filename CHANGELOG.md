@@ -7,6 +7,53 @@ crates together.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0]
+
+Identity and API keys are enforced independently, and the dictionary handshake
+gets its own ceiling. Three breaking changes, all inside the coordinated V4/V5
+release.
+
+### Breaking
+
+- Identify is the mandatory first frame on every client connection. Any other
+  first frame gets `ProtocolError` and the connection closes. Rust and Go
+  clients already comply. The .NET `WatchConnection` identifies only with an
+  identity config, so a .NET watch without one now fails until it sends the
+  probe.
+- Replication connections open with a dictionary sha hello (types 108/109).
+  Nodes on different dictionaries, or a node without the hello, refuse to
+  replicate. Mixed-version clusters don't pair in either direction.
+- The server refuses to start with a `dictionary.zstd_dict` over 1 MiB.
+
+### Changed
+
+- `--require-client-identity` requires a verified key pair, and an API key no
+  longer satisfies it (10004). A keys file requires a valid API key whatever the
+  flag says (10005). An API key sent to a server with no keys file is rejected
+  (10006). When both fail, 10004 wins. Before, the flag accepted an Identify
+  with no credentials at all.
+- Clients read the IdentifyResponse under a protocol limit (1 MiB ceiling +
+  128) instead of `max_response_size`, so a small response cap no longer blocks
+  a watch or pool. A non-Identify reply still honours the caller's cap.
+- Every client pre-seeds its dictionary cache with the built-in, so a built-in
+  server ships nothing. A pool's cache holds the built-in plus one learned
+  dictionary (it was an unbounded map), shared by connections, the probe and
+  watches.
+
+### Added
+
+- `celeriant_identify_dictionary_bytes_shipped_total` counts dictionary bytes
+  shipped in Identify responses.
+- `celeriant_internode_dictionary_mismatch_total{role}` counts refused
+  replication hellos. Both sides log ERROR naming both shas.
+
+### Known issues
+
+- The hello guards TCP replication only. S3 fallback and catchup can still
+  carry data a follower with a different dictionary or `wal_compression_level`
+  can't read, and a level mismatch can panic the follower shard. Keep the
+  dictionary and `wal_compression_level` identical across nodes.
+
 ## [0.2.0] - 2026-09-22
 
 Client API has three breaking changes.

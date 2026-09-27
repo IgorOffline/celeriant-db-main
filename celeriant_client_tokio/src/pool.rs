@@ -217,8 +217,9 @@ use celeriant_wire::network::wire_error::WireError;
 use tokio::time::Duration;
 
 use crate::ClientTlsConfig;
-use crate::celeriant_client::{CeleriantClient, ClientIdentityConfig};
+use crate::celeriant_client::{CachedDict, CeleriantClient, ClientIdentityConfig};
 use crate::client_error::ClientError;
+use crate::dict_cache::DictCache;
 use crate::client_operations::WriteEventsOptions;
 use crate::watch_connection::{WatchConnection, WatchOptions};
 
@@ -594,14 +595,13 @@ struct NodePool {
     /// within `CIRCUIT_BREAKER_COOLDOWN` of this timestamp fail immediately
     /// instead of blocking on TCP connect to a potentially dead host.
     last_connect_failure: Mutex<Option<Instant>>,
-    /// Shared pool-level dict cache. Allows `create_client` to supply a known sha
-    /// and store received bytes without a back-reference to `CeleriantPool`.
-    dict_cache: Arc<Mutex<PoolDictCache>>,
+    /// The pool's dict cache, handed to every client this node dials.
+    dict_cache: DictCache,
     counters: NodeCounters,
 }
 
 impl NodePool {
-    fn new(address: String, options: Arc<PoolOptions>, dict_cache: Arc<Mutex<PoolDictCache>>) -> Self {
+    fn new(address: String, options: Arc<PoolOptions>, dict_cache: DictCache) -> Self {
         let semaphore = Arc::new(tokio::sync::Semaphore::new(options.max_connections_per_node));
         Self {
             address,
@@ -771,7 +771,7 @@ impl NodePool {
     async fn create_client(
         address: &str,
         options: &PoolOptions,
-        dict_cache: &Arc<Mutex<PoolDictCache>>,
+        dict_cache: &DictCache,
     ) -> Result<CeleriantClient, ClientError> {
         let mut client = CeleriantClient::connect_with_timeout(
             address,
@@ -783,21 +783,11 @@ impl NodePool {
         client = client
             .with_timeout(options.request_timeout)
             .with_max_request_size(options.max_request_size)
-            .with_max_response_size(options.max_response_size);
+            .with_max_response_size(options.max_response_size)
+            .with_dict_cache(dict_cache.clone());
 
         if let Some(ref identity) = options.identity_config {
-            let known_sha = dict_cache.lock().unwrap().last_sha.clone();
-            let dict_cache_ref = Arc::clone(dict_cache);
-            client.identify_with_known_sha(identity, known_sha, move |sha| {
-                dict_cache_ref.lock().unwrap().cache.get(sha).cloned()
-            }).await.map_err(ClientError::before_mutation)?;
-
-            // If the client received new dict bytes, store them in the pool cache.
-            if let Some(ref d) = client.current_dict {
-                let mut guard = dict_cache.lock().unwrap();
-                guard.cache.entry(d.sha.clone()).or_insert_with(|| Arc::clone(&d.bytes));
-                guard.last_sha = Some(d.sha.clone());
-            }
+            client.identify(identity).await.map_err(ClientError::before_mutation)?;
         }
 
         Ok(client)
@@ -846,25 +836,6 @@ impl Drop for PooledConnection {
 // CeleriantPool
 // ---------------------------------------------------------------------------
 
-/// Pool-level content-addressed dict cache.
-///
-/// All connections to the same cluster (or distinct clusters sharing a dict)
-/// read from one in-memory copy. `last_sha` is the most-recently-seen cluster
-/// dict sha, sent as `known_dict_sha256` on every new connection so the server
-/// can skip re-shipping the bytes.
-struct PoolDictCache {
-    /// sha256 → bytes. Content-addressed so same dict under different names costs nothing.
-    cache: HashMap<String, Arc<[u8]>>,
-    /// Most recently confirmed dict sha for this pool's cluster.
-    last_sha: Option<String>,
-}
-
-impl PoolDictCache {
-    fn new() -> Self {
-        Self { cache: HashMap::new(), last_sha: None }
-    }
-}
-
 /// Topology-aware connection pool.
 ///
 /// Routes writes to the leader, distributes reads across nodes, handles
@@ -877,8 +848,7 @@ pub struct CeleriantPool {
     nodes: RwLock<HashMap<String, Arc<NodePool>>>,
     leader_address: RwLock<Option<String>>,
     read_counter: AtomicU64,
-    /// Pool-level dict cache shared between all node pools in this pool.
-    dict_cache: Arc<Mutex<PoolDictCache>>,
+    dict_cache: DictCache,
     routing: RoutingCounters,
 }
 
@@ -890,7 +860,7 @@ impl CeleriantPool {
             nodes: RwLock::new(HashMap::new()),
             leader_address: RwLock::new(None),
             read_counter: AtomicU64::new(0),
-            dict_cache: Arc::new(Mutex::new(PoolDictCache::new())),
+            dict_cache: DictCache::default(),
             routing: RoutingCounters::default(),
         }
     }
@@ -942,14 +912,12 @@ impl CeleriantPool {
 
     /// Returns the cached dict bytes for `sha`, or `None` if not yet cached.
     pub fn dict_for_sha(&self, sha: &str) -> Option<Arc<[u8]>> {
-        self.dict_cache.lock().unwrap().cache.get(sha).cloned()
+        self.dict_cache.lookup(sha)
     }
 
-    /// Insert `bytes` under `sha` and record it as the last-known cluster dict.
+    /// Record `bytes` as the cluster dict, replacing any other learned dict.
     pub fn cache_dict(&self, sha: String, bytes: Arc<[u8]>) {
-        let mut guard = self.dict_cache.lock().unwrap();
-        guard.cache.insert(sha.clone(), bytes);
-        guard.last_sha = Some(sha);
+        self.dict_cache.learn(&CachedDict { sha, bytes });
     }
 
     // --- High-level operations ---
@@ -1100,15 +1068,12 @@ impl CeleriantPool {
             return Err(err_no_addresses());
         }
         let to_followers = self.options.route_reads_to_followers;
-        let known_sha = self.dict_cache.lock().unwrap().last_sha.clone();
         for (i, addr) in addrs.iter().enumerate() {
-            let dict_cache = Arc::clone(&self.dict_cache);
             let result = WatchConnection::connect_with_dict(
                 addr,
                 request.clone(),
                 options.clone(),
-                known_sha.clone(),
-                move |sha| dict_cache.lock().unwrap().cache.get(sha).cloned(),
+                &self.dict_cache,
             ).await;
             match result {
                 Ok(conn) => return Ok(conn),
@@ -1387,7 +1352,7 @@ impl CeleriantPool {
             }
         }
         // Slow path: write lock.
-        let dict_cache = Arc::clone(&self.dict_cache);
+        let dict_cache = self.dict_cache.clone();
         let mut guard = self.nodes.write().unwrap();
         guard
             .entry(address.to_owned())
@@ -2371,6 +2336,52 @@ mod tests {
         );
     }
 
+    const CLUSTER_DICT: &[u8] = b"a cluster dictionary no client links";
+
+    fn watch_everything() -> WatchRequest {
+        WatchRequest {
+            correlation_id: None,
+            requested_latency_ms: None,
+            shard_id: None,
+            orgs: None,
+            aggregate_types: None,
+            aggregates: None,
+            operation_types: None,
+        }
+    }
+
+    /// One pooled connection's first request, which carries the Identify probe.
+    async fn probe(pool: &CeleriantPool) {
+        let mut conn = pool.get_connection().await.unwrap();
+        let _ = conn.client().send_request(&ClientRequest::Watch(watch_everything())).await;
+    }
+
+    #[tokio::test]
+    async fn a_pool_without_identity_learns_the_cluster_dict_once() {
+        let (addr, advertised) = crate::test_support::dict_shipping_server(CLUSTER_DICT).await;
+        let pool = CeleriantPool::new(PoolOptions::new(addr.to_string()));
+
+        probe(&pool).await;
+        probe(&pool).await;
+
+        let builtin = celeriant_crypto::sha256_hex(celeriant_wal::builtin_dict::BUILTIN_DICT_BYTES);
+        let cluster = celeriant_crypto::sha256_hex(CLUSTER_DICT);
+        assert_eq!(*advertised.lock().unwrap(), [Some(builtin), Some(cluster)]);
+    }
+
+    #[tokio::test]
+    async fn a_pool_watch_teaches_the_pool_the_cluster_dict() {
+        let (addr, advertised) = crate::test_support::dict_shipping_server(CLUSTER_DICT).await;
+        let pool = CeleriantPool::new(PoolOptions::new(addr.to_string()));
+
+        let _ = pool.watch(watch_everything(), WatchOptions::default()).await;
+        probe(&pool).await;
+
+        let builtin = celeriant_crypto::sha256_hex(celeriant_wal::builtin_dict::BUILTIN_DICT_BYTES);
+        let cluster = celeriant_crypto::sha256_hex(CLUSTER_DICT);
+        assert_eq!(*advertised.lock().unwrap(), [Some(builtin), Some(cluster)]);
+    }
+
     #[test]
     fn pool_dict_cache_insert_and_lookup() {
         let pool = CeleriantPool::new(PoolOptions::new("127.0.0.1:10000"));
@@ -2385,16 +2396,17 @@ mod tests {
     }
 
     #[test]
-    fn pool_dict_cache_is_content_addressed() {
+    fn pool_dict_cache_holds_one_cluster_dict_beside_the_builtin() {
         let pool = CeleriantPool::new(PoolOptions::new("127.0.0.1:10000"));
         let bytes: Arc<[u8]> = Arc::from(b"same bytes" as &[u8]);
 
         pool.cache_dict("sha-a".to_string(), Arc::clone(&bytes));
         pool.cache_dict("sha-b".to_string(), Arc::clone(&bytes));
 
-        // Both shas present.
-        assert!(pool.dict_for_sha("sha-a").is_some());
+        assert!(pool.dict_for_sha("sha-a").is_none());
         assert!(pool.dict_for_sha("sha-b").is_some());
+        let builtin = celeriant_crypto::sha256_hex(celeriant_wal::builtin_dict::BUILTIN_DICT_BYTES);
+        assert!(pool.dict_for_sha(&builtin).is_some());
     }
 
     #[test]
@@ -2403,9 +2415,8 @@ mod tests {
         let bytes: Arc<[u8]> = Arc::from(b"v1 dict" as &[u8]);
         pool.cache_dict("sha1".to_string(), Arc::clone(&bytes));
 
-        // A second insert for the same sha (e.g. a reconnect) must not overwrite.
-        // The NodePool uses `entry().or_insert_with()`.
-        // Verify the first pointer is still returned.
+        pool.cache_dict("sha1".to_string(), Arc::from(b"v1 dict" as &[u8]));
+
         let found = pool.dict_for_sha("sha1").unwrap();
         assert!(Arc::ptr_eq(&found, &bytes));
     }

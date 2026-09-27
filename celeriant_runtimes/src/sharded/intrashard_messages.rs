@@ -7,6 +7,8 @@ use glommio::channels::channel_mesh::Senders;
 use glommio::channels::local_channel::LocalReceiver;
 use glommio::net::AcceptedTcpStream;
 
+use super::connection_handler::DictAgreed;
+
 #[derive(Clone, Debug)]
 pub enum IntrashardMessages {
     Shutdown,
@@ -21,6 +23,7 @@ pub enum IntrashardMessages {
         accepted_tcp_stream: AcceptedTcpStream,
         request: ClusterRequest,
         message_version: u32,
+        agreed: DictAgreed,
     },
     ExtensionConnectionRedirect {
         accepted_tcp_stream: AcceptedTcpStream,

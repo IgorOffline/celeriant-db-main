@@ -13,6 +13,11 @@ use celeriant_msg::request::read_filters::ReadFilters;
 use celeriant_msg::response::aggregate_event_batch::AggregateEventBatch;
 use celeriant_wal::aggregate_key::AggregateKey;
 use celeriant_wal::datablocks::datablock_aggregate_event::DatablockAggregateEvent;
+use celeriant_msg::process_identify::{read_identify_response, write_identify_request};
+use celeriant_msg::request::requests::IdentifyRequest;
+use celeriant_wire::network::wire_header::WireHeader;
+use tokio::net::TcpStream;
+use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
 
 pub type R = Result<(), Box<dyn Error>>;
 
@@ -133,4 +138,31 @@ pub async fn read_all_from(
 /// Flatten all events across batches in WAL order.
 pub fn flatten(batches: &[AggregateEventBatch]) -> Vec<DatablockAggregateEvent> {
     batches.iter().flat_map(|b| b.events.clone()).collect()
+}
+
+/// A raw client-port stream that has completed an empty Identify at `version`,
+/// which the server requires as every connection's first frame. The error is a
+/// `String` so it converts into both boxed error types the tests use.
+pub async fn raw_identified(address: &str, version: u32) -> Result<Compat<TcpStream>, String> {
+    let stream = TcpStream::connect(address).await.map_err(|e| format!("connect {address}: {e}"))?;
+    let _ = stream.set_nodelay(true);
+    let mut stream = stream.compat();
+    let request = IdentifyRequest {
+        correlation_id: None,
+        public_key: None,
+        nonce: None,
+        signature: None,
+        api_key: None,
+        known_dict_sha256: None,
+    };
+    write_identify_request(&mut stream, &request, version).await.map_err(|e| format!("identify: {e:?}"))?;
+    let header = tokio::time::timeout(std::time::Duration::from_secs(30), WireHeader::from_reader(&mut stream, 64 * 1024 * 1024))
+        .await
+        .map_err(|_| "identify: no response".to_string())?
+        .map_err(|e| format!("identify header: {e:?}"))?;
+    if header.version != version {
+        return Err(format!("identify answered at version {}, sent {version}", header.version));
+    }
+    read_identify_response(header, &mut stream).await.map_err(|e| format!("identify response: {e:?}"))?;
+    Ok(stream)
 }

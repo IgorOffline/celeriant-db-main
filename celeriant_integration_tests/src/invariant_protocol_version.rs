@@ -1,7 +1,7 @@
 //! Wire-format invariant: the protocol version is pinned by a connection's first
-//! message. docs/invariants.md — "Protocol version is set on the first message
-//! (Identify or first ClientRequest). All subsequent messages use that version.
-//! No renegotiation."
+//! message. docs/invariants.md — "Protocol version is set on the first message,
+//! which is always Identify. All subsequent messages use that version. No
+//! renegotiation."
 
 use celeriant_msg::process_client_requests::ClientRequest;
 use celeriant_msg::request::read_filters::ReadFilters;
@@ -13,7 +13,7 @@ use tokio::net::TcpStream;
 use tokio::time::{Duration, timeout};
 
 use crate::TestServer;
-use crate::common::{R, port_for};
+use crate::common::{R, port_for, raw_identified};
 
 const MAX_REQUEST_SIZE: u64 = 16 * 1024 * 1024;
 const WIRE_HEADER_SIZE: usize = 17;
@@ -64,9 +64,9 @@ pub async fn pinned_per_connection() -> R {
     let server =
         TestServer::start_with_config(port_for("invariant_protocol_version"), config).await?;
 
-    // Control: V5 as a connection's FIRST message is served. Proves a later
-    // rejection is about the mid-connection switch, not about V5 itself.
-    let mut control = TcpStream::connect(server.address()).await?;
+    // Control: a connection opened at V5 is served. Proves a later rejection is
+    // about the mid-connection switch, not about V5 itself.
+    let mut control = raw_identified(server.address(), PROTOCOL_VERSION_V5).await?.into_inner();
     control.write_all(&serialize_read(PROTOCOL_VERSION_V5, 1).await?).await?;
     match read_frame(&mut control).await? {
         Some(v) if v == PROTOCOL_VERSION_V5 => {}
@@ -75,7 +75,7 @@ pub async fn pinned_per_connection() -> R {
     }
 
     // The invariant: a connection speaking V4 must not be allowed to switch to V5.
-    let mut stream = TcpStream::connect(server.address()).await?;
+    let mut stream = raw_identified(server.address(), PROTOCOL_VERSION_V4).await?.into_inner();
     stream.write_all(&serialize_read(PROTOCOL_VERSION_V4, 2).await?).await?;
     match read_frame(&mut stream).await? {
         Some(v) if v == PROTOCOL_VERSION_V4 => {}
