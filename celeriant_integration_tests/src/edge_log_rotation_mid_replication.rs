@@ -18,7 +18,7 @@
 //!
 //! This is test #7 in the integration test coverage report.
 //!
-//! Run with: cargo run --bin edge_log_rotation_mid_replication_main
+//! Run with: cargo run --release -p celeriant_integration_tests -- --test edge_log_rotation_mid_replication
 
 use celeriant_client_tokio::celeriant_client::CeleriantClient;
 use crate::{

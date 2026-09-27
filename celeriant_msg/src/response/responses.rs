@@ -5,6 +5,46 @@ use serde::{Deserialize, Serialize};
 
 use crate::response::{aggregate_event_batch::AggregateEventBatch, watch_event::WatchResponseEvent};
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Encode, Decode)]
+pub struct AggregateConflict {
+    pub key: celeriant_wal::aggregate_key::AggregateKey,
+    pub expected: u64,
+    pub current: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+pub struct WriteConflictResponse {
+    pub correlation_id: Option<u128>,
+    pub conflicts: Vec<AggregateConflict>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+pub struct DeleteConflictResponse {
+    pub correlation_id: Option<u128>,
+    pub conflicts: Vec<AggregateConflict>,
+}
+
+/// Both client codecs fit this uncompressed body reservation, excluding the frame header.
+pub fn conflict_response_reservation(pinned_entries: usize) -> Option<u64> {
+    u64::try_from(pinned_entries).ok()?.checked_mul(74)?.checked_add(25)
+}
+
+#[cfg(test)]
+mod conflict_capacity_tests {
+    use super::conflict_response_reservation;
+
+    #[test]
+    fn reservation_overflow_never_becomes_an_admissible_small_response() {
+        assert_eq!(conflict_response_reservation(0), Some(25));
+        assert_eq!(conflict_response_reservation(2), Some(173));
+        if let Ok(last) = usize::try_from((u64::MAX - 25) / 74) {
+            assert!(conflict_response_reservation(last).is_some());
+            assert_eq!(conflict_response_reservation(last + 1), None);
+            assert_eq!(conflict_response_reservation(usize::MAX), None);
+        }
+    }
+}
+
 
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct OrgListItem {

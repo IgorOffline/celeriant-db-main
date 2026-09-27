@@ -7,7 +7,7 @@ use celeriant_msg::process_client_responses::ClientResponse;
 use celeriant_msg::process_identify::{IDENTIFY_RESPONSE_TYPE_ID, read_identify_response, write_identify_request};
 use celeriant_msg::request::requests::{IdentifyRequest, WatchRequest};
 use celeriant_msg::response::responses::WatchResponse;
-use celeriant_wire::network::wire_header::{PROTOCOL_VERSION_V2, WireHeader};
+use celeriant_wire::network::wire_header::{PROTOCOL_VERSION_V4, WireHeader};
 use tokio::time::{timeout, Duration};
 
 use crate::ClientTlsConfig;
@@ -166,11 +166,17 @@ where
         known_dict_sha256: known_sha,
     };
 
-    write_identify_request(stream, &req, PROTOCOL_VERSION_V2).await?;
+    write_identify_request(stream, &req, PROTOCOL_VERSION_V4).await?;
 
     let header = WireHeader::from_reader(stream, max_response_size).await?;
+    if header.version != PROTOCOL_VERSION_V4 {
+        return Err(ClientError::ProtocolError);
+    }
     if header.message_type == IDENTIFY_RESPONSE_TYPE_ID {
         let resp = read_identify_response(header, stream).await?;
+        if resp.correlation_id != req.correlation_id {
+            return Err(ClientError::CorrelationMismatch { sent: req.correlation_id, received: resp.correlation_id });
+        }
         let cached = match (resp.compression_dict_sha256, resp.compression_dict_bytes) {
             (Some(sha), Some(bytes)) => {
                 Some(CachedDict { sha, bytes: Arc::from(bytes.into_boxed_slice()) })
@@ -184,6 +190,9 @@ where
         return Ok(cached);
     }
     let response = ClientResponse::read_from_header(header, stream).await?;
+    if response.carries_correlation_id() && response.correlation_id() != req.correlation_id {
+        return Err(ClientError::CorrelationMismatch { sent: req.correlation_id, received: response.correlation_id() });
+    }
     match response {
         ClientResponse::GenericError(err) => Err(ClientError::from_error_response(err)),
         _ => Err(ClientError::ProtocolError),
@@ -278,18 +287,16 @@ impl WatchConnection {
         .await?;
 
         let (current_dict, response) = bounded(options.timeout, async {
-            let current_dict = if let Some(ref identity) = options.identity_config {
-                identify_stream(&mut stream, identity, known_sha.clone(), dict_lookup.clone(), options.max_response_size).await?
-            } else {
-                None
-            };
+            let unsigned = ClientIdentityConfig { public_key: None, private_key: None, api_key: None };
+            let identity = options.identity_config.as_ref().unwrap_or(&unsigned);
+            let current_dict = identify_stream(&mut stream, identity, known_sha.clone(), dict_lookup.clone(), options.max_response_size).await?;
 
             // Send initial watch request without shard_id. Watch is fixed-size — never compressed.
             ClientRequest::write_request(
                 &mut stream,
                 &ClientRequest::Watch(request.clone()),
                 options.max_request_size,
-                PROTOCOL_VERSION_V2,
+                PROTOCOL_VERSION_V4,
             )
             .await?;
 
@@ -323,7 +330,7 @@ impl WatchConnection {
                         &mut stream,
                         &ClientRequest::Watch(shard0_request),
                         options.max_request_size,
-                        PROTOCOL_VERSION_V2,
+                        PROTOCOL_VERSION_V4,
                     )
                     .await?;
 
@@ -450,11 +457,9 @@ impl WatchConnection {
         .await?;
 
         let (current_dict, response) = bounded(options.timeout, async {
-            let current_dict = if let Some(ref identity) = options.identity_config {
-                identify_stream(&mut stream, identity, known_sha, dict_lookup, options.max_response_size).await?
-            } else {
-                None
-            };
+            let unsigned = ClientIdentityConfig { public_key: None, private_key: None, api_key: None };
+            let identity = options.identity_config.as_ref().unwrap_or(&unsigned);
+            let current_dict = identify_stream(&mut stream, identity, known_sha, dict_lookup, options.max_response_size).await?;
 
             let mut shard_request = request.clone();
             shard_request.shard_id = Some(shard_id);
@@ -463,7 +468,7 @@ impl WatchConnection {
                 &mut stream,
                 &ClientRequest::Watch(shard_request),
                 options.max_request_size,
-                PROTOCOL_VERSION_V2,
+                PROTOCOL_VERSION_V4,
             )
             .await?;
 
@@ -540,7 +545,7 @@ mod tests {
     use celeriant_msg::response::responses::WatchResponse;
     use celeriant_msg::response::watch_event::WatchResponseEvent;
     use celeriant_wal::builtin_dict::BUILTIN_DICT_BYTES;
-    use celeriant_wire::network::wire_header::{PROTOCOL_VERSION_V2, WIRE_HEADER_SIZE};
+    use celeriant_wire::network::wire_header::{PROTOCOL_VERSION_V4, WIRE_HEADER_SIZE};
     use futures_lite::io::Cursor;
 
     fn test_codec() -> celeriant_wire::codec::compression::DictCodec {
@@ -559,7 +564,7 @@ mod tests {
                 true,
                 &codec,
                 64 * 1024 * 1024,
-                PROTOCOL_VERSION_V2,
+                PROTOCOL_VERSION_V4,
             )
             .await
             .expect("write_response");
@@ -643,7 +648,7 @@ mod tests {
                 false,
                 &codec,
                 64 * 1024 * 1024,
-                PROTOCOL_VERSION_V2,
+                PROTOCOL_VERSION_V4,
             )
             .await
             .expect("write_response");
@@ -684,7 +689,6 @@ mod tests {
     /// frame can be cut anywhere and left unfinished for as long as the test
     /// likes.
     async fn scripted_watch_server() -> (std::net::SocketAddr, tokio::sync::mpsc::UnboundedSender<Vec<u8>>) {
-        use celeriant_wire::network::wire_header::WireHeader;
         use futures_lite::{AsyncReadExt, AsyncWriteExt};
         use tokio_util::compat::TokioAsyncReadCompatExt;
 
@@ -697,7 +701,7 @@ mod tests {
             let mut stream = socket.compat();
             // Drain the client's WatchRequest and acknowledge it, which is all
             // `connect` needs to settle on the single-shard path.
-            let header = WireHeader::from_reader(&mut stream, WATCH_MAX).await.unwrap();
+            let header = crate::test_support::request_header(&mut stream, WATCH_MAX).await.unwrap();
             let mut body = vec![0u8; header.compressed_length as usize];
             stream.read_exact(&mut body).await.unwrap();
             stream.write_all(&ack).await.unwrap();
@@ -820,13 +824,9 @@ mod tests {
         );
     }
 
-    /// Decompression and deserialisation happen after the frame is off the
-    /// socket, so failing there leaves the reader on a message boundary. Arming
-    /// the counter on those errors refuses a connection that is perfectly
-    /// usable — the same shape as arming the pooled client's dirty flag on a
-    /// zero-byte local failure.
+    /// Malformed watch frames retire their connection.
     #[tokio::test]
-    async fn a_decode_error_on_a_fully_consumed_frame_leaves_the_watch_usable() {
+    async fn a_decode_error_on_a_fully_consumed_frame_retires_the_watch() {
         let (addr, wire) = scripted_watch_server().await;
         let mut watch = WatchConnection::connect(&addr.to_string(), watch_request(), WatchOptions::default())
             .await
@@ -845,15 +845,9 @@ mod tests {
             "test premise: the frame must fail to decode"
         );
 
-        // The stream is clean. Before phase 3 this frame was delivered.
         wire.send(watch_frame(&watch_events(3))).unwrap();
-        match watch.next_timeout(Duration::from_secs(5)).await {
-            Ok(Some(r)) => assert_eq!(r.events.len(), 3),
-            other => panic!(
-                "a decode error consumed the whole frame, leaving the stream on a message \
-                 boundary, yet the connection is permanently unusable: {other:?}"
-            ),
-        }
+        assert!(matches!(watch.next_timeout(Duration::from_secs(5)).await, Err(crate::ClientError::ProtocolError)));
+
     }
 
     /// A peer that accepts the socket and never acknowledges the watch request must not park `connect` forever
@@ -917,7 +911,7 @@ mod tests {
                 compression_dict_sha256: Some(UNCACHED_SHA.to_string()),
                 compression_dict_bytes: None,
             };
-            write_identify_response(&mut stream, &resp, PROTOCOL_VERSION_V2).await.unwrap();
+            write_identify_response(&mut stream, &resp, PROTOCOL_VERSION_V4).await.unwrap();
             stream.flush().await.unwrap();
             if WireHeader::from_reader(&mut stream, WATCH_MAX).await.is_ok() {
                 let _ = watched.send(()).await;

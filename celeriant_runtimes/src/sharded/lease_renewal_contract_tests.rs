@@ -1,4 +1,4 @@
-//! Blind contract tests for on-demand S3 lease renewal delivery.
+//! Contract tests for on-demand S3 lease renewal delivery.
 //!
 //! The promised behaviour (doc comments on `run_s3_fallback` in
 //! `celeriant_shard/src/shard_wal_replicate.rs` and on `renew_s3_lease_on_demand`

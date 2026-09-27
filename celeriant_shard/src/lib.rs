@@ -29,3 +29,4 @@ pub mod replicate_follower_catchup;
 #[cfg(test)] mod drain_settle_contract_tests;
 #[cfg(test)] mod wal_recovery_contract_tests;
 #[cfg(test)] mod promotion_dedup_contract_tests;
+#[cfg(test)] mod occ_guard_contract_tests;

@@ -1,21 +1,6 @@
-//! Blind contract tests for idle commit-notify (phase 3
-//! brief oracles 1-3). These test the PROMISED behavior: an empty-batches
-//! ReplicationBatchRequest that passes all existing guards (time/drift/epoch)
-//! is a COMMIT-NOTIFY carrier — the follower returns Success, runs the same
-//! floor-update/parked-drain/read-persistence the data path runs, and never
-//! extends the chain. An empty batch failing a guard is still rejected with
-//! that guard's reason.
-//!
-//! All three tests are expected RED on current code: empty batches are
-//! rejected EmptyBatch, and (contrary to the phase 3 brief's guard-order
-//! claim) that rejection fires BEFORE the drift and epoch guards today — only
-//! the NotAFollower role check precedes it. The stale-epoch fencing test is
-//! therefore red too; it encodes the contracted guard order and must go (and
-//! stay) green when the notify path lands.
-//!
-//! Scaffolding is copied from follower_commit_contract_tests.rs: real wire
-//! batches captured from a real leader shard, disk-truth cursor observation
-//! via a reopened LogSegmentsCache.
+//! Empty replication batches carry commit notifications after role, time and epoch checks.
+//! They advance the durable read floor and drain parked notifications without extending
+//! the chain. Tests use real leader batches and reopen the WAL to verify persisted cursors.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -347,7 +332,6 @@ async fn park_deferred_tail<R: ReplicationClient, D: crate::s3_downloader::S3Dow
 /// covering leader_confirmed_wal_seq, is a commit-notify: the follower returns
 /// Success and commits the parked tail — entries readable, parked watch events
 /// fire, read persisted to the confirmed tip.
-/// Expected RED on current code: rejected EmptyBatch.
 #[test]
 fn contract_commit_notify_commits_parked_tail() {
     glommio_test!({
@@ -448,8 +432,6 @@ fn contract_stale_epoch_empty_notify_rejected_tail_untouched() {
 /// chain-extending batch: after a Success notify the write cursor and tip hash
 /// are unchanged, and a subsequent REAL batch chaining on the pre-notify tip
 /// applies cleanly.
-/// Expected RED on current code: the notify is rejected EmptyBatch, so the
-/// Success assertion fails before anything else can be observed.
 #[test]
 fn contract_commit_notify_never_extends_chain() {
     glommio_test!({

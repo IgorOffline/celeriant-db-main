@@ -11,7 +11,7 @@
 //! alone can't build queue pressure. Instead we block → build WAL gap → unblock →
 //! the gap triggers FollowerTooFarBehind → S3 path → kick over now-open TCP.
 //!
-//! Run with: cargo run --bin s3_follower_kick_main
+//! Run with: cargo run --release -p celeriant_integration_tests -- --test s3_follower_kick
 
 use celeriant_client_tokio::celeriant_client::CeleriantClient;
 use crate::{

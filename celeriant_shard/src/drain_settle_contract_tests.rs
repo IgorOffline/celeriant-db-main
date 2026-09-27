@@ -1,8 +1,8 @@
-//! Blind contract tests for the catchup drain-settle barrier.
+//! Contract tests for the catchup drain-settle barrier.
 //! ## What is under test
 //!
-//! O2 shrinks the production barrier from 8 rounds to 2, leaving the interval at 750ms
-//! and the test-cfg round count at 3. Two separate things need pinning:
+//! The production barrier requires 2 stable rounds at 750ms intervals; the
+//! test configuration uses 3 rounds. Both sizing and behavior are checked:
 //!
 //!   * the SIZING, which is a deliberate operational choice (6s -> 1.5s of required
 //!     stability on the cold recovery path) and must not be edited without breaking a

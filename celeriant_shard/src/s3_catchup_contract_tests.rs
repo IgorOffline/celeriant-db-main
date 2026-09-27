@@ -1,8 +1,6 @@
-//! Blind-oracle contract tests for the S3 catchup surface. Authored against
-//! the catchup contract and `catchup_test_support` fixtures only, never
-//! against the implementation.
+//! S3 catchup must not skip visible data or declare completion without evidence.
 //!
-//! Tested promise: a catchup round that made no progress must be fail-closed.
+//! A catchup round that made no progress must be fail-closed.
 //! It may only declare Caught after proving no more data is coming (empty S3,
 //! or a settle/re-list barrier over a strictly-behind view). Data visible
 //! ahead of the local position, or files landing late while the leader's
@@ -209,12 +207,9 @@ fn poison_file_claiming_coverage_cannot_wedge_catchup() {
 
 // ── C6: no-progress verdict truth table ──
 //
-// Contract amendment: the original two-input contract ("late-landing files
-// must always be awaited") was falsified by the chaos oracle. A follower that
-// never exits catchup under live load rejects TCP and forces the entire
-// workload onto S3 fallback (a NoS3Fallbacks baseline red). The refined
-// contract keys patience on the node's role and its position vs the last
-// OBSERVED leader tip: a follower at/past everything the leader was known to
+// A follower that never exits catchup rejects TCP and forces the workload
+// onto S3 fallback. Completion depends on the node's role and its position
+// relative to the last observed leader tip: a follower at/past everything the leader was known to
 // hold exits immediately (TCP owns the residue); behind it, or with data
 // visible ahead, it never claims Caught. A promoting leader-elect has no TCP
 // fallback and always settles the view first.
@@ -261,8 +256,7 @@ fn no_progress_verdict_truth_table() {
 
 // ── C7: follower at the observed tip hands back to TCP (anti-storm) ──
 
-/// Implementer-authored pin (not blind): encodes a NoS3Fallbacks baseline
-/// red from chaos. PASS: a follower that has consumed up to the leader tip
+/// A follower that has consumed up to the leader tip
 /// it observed exits Caught immediately. It does NOT sit in a settle window
 /// scooping up whatever the (still-uploading) leader lands next: while a
 /// follower is in catchup it rejects TCP and every leader commit is forced
@@ -681,7 +675,7 @@ fn bridged_position_rearms_live_tail_yield() {
 
 // ── AB: attempt bound ──
 //
-// Phase 1 contract: a single catchup invocation returns control in bounded
+// A single catchup invocation returns control in bounded
 // work no matter how the S3 view evolves. `rounds` never exceeds the bound
 // (MAX_CONSUME_ROUNDS = 8, same in test and production builds); a bound-exit
 // with consumable data still visible is Retry, never Caught; every batch
@@ -817,7 +811,7 @@ fn arm_never_covering_feed(dl: &Rc<MockDownloader>, len: u64) {
 /// files it can never chain onto, exits at the round bound with Retry and
 /// zero progress. FAIL: the drain barrier's late-file catches hold the
 /// invocation open for the length of the feed. Cap-exit stall classification
-/// is deliberately unpinned (owned by the orchestrator phase).
+/// is deliberately unpinned (handled by the catchup orchestrator).
 #[test]
 fn following_never_covering_feed_exits_at_round_bound_without_progress() {
     glommio_test!({

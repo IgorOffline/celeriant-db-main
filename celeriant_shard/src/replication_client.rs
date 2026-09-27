@@ -787,7 +787,7 @@ mod tests {
 
     use celeriant_msg::process_cluster_requests::ClusterRequestType;
     use celeriant_msg::response::responses::{HeartbeatResponse, KickFollowerResponse, ReplicationBatchResponse};
-    use celeriant_wire::network::wire_header::{PROTOCOL_VERSION_V2, WireHeader};
+    use celeriant_wire::network::wire_header::{PROTOCOL_VERSION_V4, WireHeader};
     use futures_lite::AsyncWriteExt;
     use futures_lite::future::poll_once;
     use glommio::{LocalExecutorBuilder, Placement};
@@ -914,7 +914,7 @@ mod tests {
                         while !server.gate.get() {
                             park_briefly().await;
                         }
-                        if ClusterResponse::write_response(&mut stream, &response, MOCK_MAX, PROTOCOL_VERSION_V2).await.is_err() {
+                        if ClusterResponse::write_response(&mut stream, &response, MOCK_MAX, PROTOCOL_VERSION_V4).await.is_err() {
                             break;
                         }
                         let _ = stream.flush().await;

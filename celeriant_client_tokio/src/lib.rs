@@ -13,7 +13,7 @@ pub mod client_tls_config;
 
 pub use celeriant_client::{CachedDict, CeleriantClient, ClientIdentityConfig};
 pub use client_tls_config::{sni_host, ClientTlsConfig};
-pub use client_operations::WriteEventsOptions;
+pub use client_operations::{WriteBatch, WriteEventsOptions};
 pub use event_helpers::{from_json, json_event};
 pub use client_error::ClientError;
 pub use pool::{
@@ -25,3 +25,6 @@ pub use pool_trait::CeleriantPoolApi;
 pub use read_all_iterator::ReadAllIterator;
 pub use server_error::*;
 pub use watch_connection::{WatchConnection, WatchOptions};
+
+#[cfg(test)]
+mod test_support;

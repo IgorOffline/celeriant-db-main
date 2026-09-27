@@ -9,7 +9,7 @@
 //! 5. Secondary key works
 //! 6. Backward compatibility (no API keys)
 //!
-//! Run with: cargo run --bin api_key_test
+//! Run with: cargo run --release -p celeriant_integration_tests -- --test api_key_test
 
 use std::collections::HashMap;
 use std::fs;

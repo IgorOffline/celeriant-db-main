@@ -14,7 +14,7 @@
 //! count polls to the leader's count within `FOLLOWER_CONVERGENCE_TIMEOUT`.
 //! Equality after the poll stays strict.
 //!
-//! Run with: cargo run --bin invariant_replication_convergence_main
+//! Run with: cargo run --release -p celeriant_integration_tests -- --test invariant_replication_convergence
 
 use celeriant_client_tokio::celeriant_client::CeleriantClient;
 use crate::{

@@ -179,7 +179,7 @@ fn trailing_or_skip(outcome: Result<Vec<u8>, KtlsError>) -> Option<Vec<u8>> {
     }
 }
 
-/// The case the blind contract cannot check: a first app-data record split
+/// A first app-data record split
 /// across two `write()`s must be reassembled, and its plaintext handed back
 /// byte-exact. Every interesting split point is exercised — inside the 5-byte
 /// header (length not even known yet), at the header boundary, and inside the

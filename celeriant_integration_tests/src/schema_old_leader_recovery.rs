@@ -10,7 +10,7 @@
 //! 7. Kill B, wait for A to become leader again
 //! 8. Verify schema enforcement on A — proves schema survived the full cycle
 //!
-//! Run with: cargo run --bin schema_old_leader_recovery_main -p celeriant_integration_tests --release
+//! Run with: cargo run --release -p celeriant_integration_tests -- --test schema_old_leader_recovery
 
 use std::collections::HashMap;
 use std::sync::Arc;

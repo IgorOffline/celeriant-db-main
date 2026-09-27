@@ -3,14 +3,12 @@ use std::time::Duration;
 
 use bincode::{Decode, Encode};
 use celeriant_wire::network::wire_header::{
-    WireHeader, wire_header_write_fixed_size, wire_header_write_variable_size_uncompressed,
+    PROTOCOL_VERSION_V4, PROTOCOL_VERSION_V5, WireHeader, wire_header_write_fixed_size,
+    wire_header_write_variable_size_uncompressed,
 };
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use futures_lite::{future::block_on, io::Cursor};
 use serde::{Deserialize, Serialize};
-
-const PROTOCOL_VERSION_V2: u32 = 2;
-const PROTOCOL_VERSION_V3: u32 = 3;
 
 criterion_group!(benches, bench_fixed_vs_variable);
 criterion_main!(benches);
@@ -35,8 +33,8 @@ fn create_small_message() -> SmallMessage {
 
 fn protocol_versions() -> Vec<(&'static str, u32)> {
     vec![
-        ("v2_bincode", PROTOCOL_VERSION_V2),
-        ("v3_msgpack", PROTOCOL_VERSION_V3),
+        ("v4_bincode", PROTOCOL_VERSION_V4),
+        ("v5_msgpack", PROTOCOL_VERSION_V5),
     ]
 }
 

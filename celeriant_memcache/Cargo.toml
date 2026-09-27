@@ -17,3 +17,6 @@ lru.workspace = true
 deepsize.workspace = true
 metrics.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+rand.workspace = true

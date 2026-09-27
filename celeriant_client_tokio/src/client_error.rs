@@ -44,8 +44,22 @@ pub enum ClientError {
 }
 
 impl ClientError {
+    pub(crate) fn before_mutation(self) -> Self {
+        match self {
+            Self::RequestTimeout => Self::ConnectionTimeout,
+            Self::WireError(WireError::NetworkError(error))
+            | Self::ReadError(ReadWireDataError::ReadHeaderFailure(WireError::NetworkError(error)))
+            | Self::ReadError(ReadWireDataError::ReadBodyFailure(WireError::NetworkError(error))) => {
+                Self::ConnectionFailed(error)
+            }
+            other => other,
+        }
+    }
+
     pub(crate) fn from_error_response(error: ErrorResponse) -> Self {
-        if error.is_not_leader() {
+        if matches!(error.error_code, celeriant_msg::error_codes::WRITE_OPTIMISTIC_CONCURRENCY_VIOLATION | celeriant_msg::error_codes::DELETE_OPTIMISTIC_CONCURRENCY_VIOLATION) {
+            ClientError::ProtocolError
+        } else if error.is_not_leader() {
             let leader_address = error.parse_leader_address();
             let error_message = error.error_message;
             ClientError::NotLeader { leader_address, error_message }

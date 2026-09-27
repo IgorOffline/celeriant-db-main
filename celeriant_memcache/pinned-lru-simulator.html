@@ -1,0 +1,595 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Open locally in a browser. Mirrors pinned_lru.rs; the trace must match the Rust test
+     simulator_scenarios_end_in_their_expected_state line for line. -->
+<title>PinnedLru Playground</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+  :root {
+    --ground: #f2f5f3;
+    --surface: #ffffff;
+    --ink: #16201c;
+    --muted: #5b6863;
+    --rule: #d3dbd7;
+    --ordinary: #1d7666;
+    --ordinary-soft: #dcefea;
+    --pinned: #a86200;
+    --pinned-soft: #f8ead3;
+    --danger: #b3261e;
+    --danger-soft: #f8dedb;
+    --focus: #2360c4;
+    --sans: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --ground: #0f1513; --surface: #17201c; --ink: #e2ebe7; --muted: #95a39d; --rule: #2b3632;
+      --ordinary: #52c2ab; --ordinary-soft: #173a33; --pinned: #e8a54a; --pinned-soft: #3a2c16;
+      --danger: #f07a6f; --danger-soft: #3d1c19; --focus: #7aa7f5;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --ground: #0f1513; --surface: #17201c; --ink: #e2ebe7; --muted: #95a39d; --rule: #2b3632;
+    --ordinary: #52c2ab; --ordinary-soft: #173a33; --pinned: #e8a54a; --pinned-soft: #3a2c16;
+    --danger: #f07a6f; --danger-soft: #3d1c19; --focus: #7aa7f5;
+  }
+
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body {
+    margin: 0;
+    background: var(--ground); color: var(--ink); font-family: var(--sans);
+    font-size: 15px; line-height: 1.5; padding-inline: 16px; padding-block: 28px 48px;
+  }
+  .wrap { max-width: 1120px; margin: 0 auto; display: grid; gap: 24px; }
+  h1 { font-size: 26px; font-weight: 600; margin: 0; text-wrap: balance; letter-spacing: -0.01em; }
+  h2 { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 0; }
+  p { margin: 0; }
+  code, .mono { font-family: var(--mono); font-size: 0.92em; }
+  .lede { color: var(--muted); max-width: 68ch; }
+  .lede code { color: var(--ink); }
+
+  .layout { display: grid; grid-template-columns: 300px 1fr; gap: 24px; align-items: start; }
+  @media (max-width: 820px) { .layout { grid-template-columns: 1fr; } }
+
+  .panel { background: var(--surface); border: 1px solid var(--rule); border-radius: 8px; padding: 18px; display: grid; gap: 14px; }
+  .stack { display: grid; gap: 24px; }
+
+  label { font-size: 12px; color: var(--muted); display: grid; gap: 4px; }
+  input, select {
+    font: 500 14px var(--mono); color: var(--ink); background: var(--ground);
+    border: 1px solid var(--rule); border-radius: 6px; padding: 7px 9px; width: 100%;
+  }
+  .fields { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .ops { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  button {
+    font: 500 13px var(--mono); color: var(--ink); background: var(--ground);
+    border: 1px solid var(--rule); border-radius: 6px; padding: 8px 6px; cursor: pointer;
+  }
+  button:hover { border-color: var(--muted); }
+  button:focus-visible, input:focus-visible, select:focus-visible, .line:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+  button.pin { background: var(--pinned-soft); border-color: var(--pinned); }
+  button.primary { background: var(--ink); color: var(--surface); border-color: var(--ink); }
+  button:disabled { opacity: 0.4; cursor: default; }
+  .row { display: flex; gap: 8px; }
+  .row > * { flex: 1; }
+  .about { font-size: 13.5px; color: var(--muted); }
+  .error { font-size: 13px; color: var(--danger); background: var(--danger-soft); border-radius: 6px; padding: 8px 10px; }
+
+  .lane-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .lane-note { font-size: 12.5px; color: var(--muted); }
+  .slots { display: flex; gap: 8px; flex-wrap: wrap; }
+  .slot {
+    width: 92px; height: 64px; border-radius: 6px; display: grid; place-content: center; text-align: center;
+    font-family: var(--mono); border: 1px solid var(--ordinary); background: var(--ordinary-soft);
+  }
+  .slot.empty { border: 1px dashed var(--rule); background: transparent; color: var(--muted); font-size: 12px; }
+  .slot .k { font-weight: 600; font-size: 17px; }
+  .slot .v { font-size: 12px; color: var(--muted); }
+  .slot.touched, .card.touched { box-shadow: 0 0 0 2px var(--focus); }
+  .ends { display: flex; justify-content: space-between; font-size: 11.5px; color: var(--muted); font-family: var(--mono); }
+
+  .cards { display: flex; gap: 8px; flex-wrap: wrap; min-height: 64px; }
+  .card {
+    min-width: 110px; border-radius: 6px; padding: 8px 12px; font-family: var(--mono);
+    border: 1px solid var(--pinned); background: var(--pinned-soft); display: grid; gap: 2px;
+  }
+  .card.unloaded { border-style: dashed; background: transparent; }
+  .card .k { font-weight: 600; font-size: 17px; }
+  .card .meta { font-size: 12px; color: var(--muted); display: flex; justify-content: space-between; gap: 10px; }
+  .none { font-size: 13px; color: var(--muted); align-self: center; }
+
+  .evicted { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; font-size: 12.5px; color: var(--danger); min-height: 26px; }
+  .chip { font-family: var(--mono); border: 1px solid var(--danger); border-radius: 999px; padding: 1px 9px; background: var(--danger-soft); text-decoration: line-through; }
+
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  @media (max-width: 520px) { .stats { grid-template-columns: repeat(2, 1fr); } }
+  .stat .n { font: 600 22px var(--mono); font-variant-numeric: tabular-nums; }
+  .stat .n.over { color: var(--pinned); }
+  .stat .l { font-size: 12px; color: var(--muted); }
+  .meter { height: 8px; border-radius: 4px; background: var(--ground); border: 1px solid var(--rule); position: relative; overflow: hidden; }
+  .meter span { position: absolute; top: 0; bottom: 0; left: 0; }
+  .meter .fill { background: var(--ordinary); }
+  .meter .extra { background: var(--pinned); }
+
+  .checks { display: grid; gap: 4px; font-size: 13px; }
+  .check::before { content: "✓ "; color: var(--ordinary); font-weight: 600; }
+  .check.bad { color: var(--danger); }
+  .check.bad::before { content: "✗ "; color: var(--danger); }
+
+  .trace { overflow-x: auto; border: 1px solid var(--rule); border-radius: 6px; background: var(--ground); max-height: 360px; }
+  .line {
+    display: block; width: 100%; text-align: left; border: 0; border-radius: 0; background: transparent;
+    font: 12.5px/1.7 var(--mono); padding: 1px 12px; white-space: pre; color: var(--muted);
+  }
+  .line.done { color: var(--ink); }
+  .line.current { background: var(--ordinary-soft); color: var(--ink); }
+  .line:hover { background: var(--surface); }
+
+  .mechanics { display: grid; gap: 8px; padding-left: 18px; margin: 0; max-width: 78ch; }
+  .mechanics li::marker { color: var(--muted); }
+  @media (prefers-reduced-motion: no-preference) { .slot, .card { transition: box-shadow 0.15s; } }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header style="display:grid;gap:8px">
+    <h1>PinnedLru Playground</h1>
+    <p class="lede">
+      A step-through copy of <code>celeriant_memcache/…/validation_pins/pinned_lru.rs</code>. The trace lines match
+      the Rust test <code>simulator_scenarios_end_in_their_expected_state</code> character for character.
+      Load a scenario and step through it, or run your own operations.
+    </p>
+  </header>
+
+  <div class="layout">
+    <aside class="stack">
+      <section class="panel" aria-labelledby="scenario-h">
+        <h2 id="scenario-h">Scenario</h2>
+        <select id="scenario" aria-label="Scenario"></select>
+        <p class="about" id="about"></p>
+        <div class="row">
+          <button id="back" title="Step back">← back</button>
+          <button id="step" class="primary" title="Apply the next operation">step →</button>
+        </div>
+        <div class="row">
+          <button id="restart">restart</button>
+          <button id="end">run to end</button>
+        </div>
+      </section>
+
+      <section class="panel" aria-labelledby="ops-h">
+        <h2 id="ops-h">Your operations</h2>
+        <div class="fields">
+          <label for="cap">cap <input id="cap" type="number" min="1" max="12" value="3"></label>
+          <label for="key">key <input id="key" type="number" min="0" max="99" value="1"></label>
+          <label for="value">value <input id="value" type="number" min="0" max="999" value="10"></label>
+        </div>
+        <div class="ops">
+          <button data-op="put">put</button>
+          <button data-op="get">get</button>
+          <button data-op="pop">pop</button>
+          <button data-op="pin" class="pin">pin</button>
+          <button data-op="unpin" class="pin">unpin</button>
+          <button data-op="demote">demote</button>
+          <button data-op="clear">clear</button>
+          <button id="empty" style="grid-column: span 2">new empty cache</button>
+        </div>
+        <p class="about">An operation replaces any steps after the current one. Changing cap starts a new cache.</p>
+        <p class="error" id="error" hidden></p>
+      </section>
+    </aside>
+
+    <main class="stack">
+      <section class="panel" aria-labelledby="ord-h">
+        <div class="lane-head">
+          <h2 id="ord-h">Ordinary LRU</h2>
+          <span class="lane-note">bounded by cap · evicts from the right</span>
+        </div>
+        <div class="slots" id="slots"></div>
+        <div class="ends" id="ends"><span>most recent</span><span>next to evict</span></div>
+        <div class="evicted" id="evicted"></div>
+      </section>
+
+      <section class="panel" aria-labelledby="pin-h">
+        <div class="lane-head">
+          <h2 id="pin-h">Reservations</h2>
+          <span class="lane-note">outside cap · never evicted · ? = unloaded, not absent</span>
+        </div>
+        <div class="cards" id="cards"></div>
+      </section>
+
+      <section class="panel" aria-labelledby="stats-h">
+        <h2 id="stats-h">Accounting</h2>
+        <div class="stats">
+          <div class="stat"><div class="n" id="len"></div><div class="l">len / cap</div></div>
+          <div class="stat"><div class="n" id="ordlen"></div><div class="l">ordinary entries</div></div>
+          <div class="stat"><div class="n" id="loaded"></div><div class="l">loaded reserved</div></div>
+          <div class="stat"><div class="n" id="reserved"></div><div class="l">reserved keys</div></div>
+        </div>
+        <div class="meter" aria-hidden="true"><span class="fill" id="fill"></span><span class="extra" id="extra"></span></div>
+        <div class="checks" id="checks"></div>
+      </section>
+
+      <section class="panel" aria-labelledby="trace-h">
+        <div class="lane-head">
+          <h2 id="trace-h">Trace</h2>
+          <span class="lane-note">click a line to jump there</span>
+        </div>
+        <div class="trace" id="trace"></div>
+      </section>
+    </main>
+  </div>
+
+  <section class="panel" aria-labelledby="mech-h">
+    <h2 id="mech-h">Mechanics to look for</h2>
+    <ul class="mechanics">
+      <li>The first <code>pin</code> moves a value out of the LRU; the last <code>unpin</code> moves it back as most recent. Overlapping requests share one slot, counted by <code>×n</code>.</li>
+      <li><code>len()</code> counts loaded reservations, so it can pass <code>cap</code>. Every "cache full" check in <code>ShardMemCache</code> trips early while pins are live.</li>
+      <li>Releasing a large request can flush the LRU: see <em>large release flush</em>, where the just-read key 1 is evicted.</li>
+      <li>Recency isn't tracked while a key is reserved. A key reserved long ago comes back ahead of keys used since.</li>
+      <li><code>clear</code> (rollback) drops values and keeps reservations. A key showing <code>?</code> must be reloaded before validation can decide.</li>
+      <li>An unbalanced <code>unpin</code> panics in Rust. Only <code>ValidationPins</code> can call it, so that needs a bug in the guard.</li>
+      <li>Not shown here: the reservation table shrinks back to about <code>max(cap, 2 × live)</code> slots after a large release.</li>
+    </ul>
+  </section>
+</div>
+
+<script>
+// Port of celeriant_memcache/src/shard_mem_cache/validation_pins/pinned_lru.rs.
+// `trace` must reproduce the Rust test `simulator_scenarios_end_in_their_expected_state`.
+(function (root) {
+  const fmt = (v) => (v === null || v === undefined ? "None" : `Some(${v})`);
+
+  class PinnedLru {
+    constructor(cap) {
+      this.cap = cap;
+      this.ordinary = []; // [key, value], most recent first
+      this.pinned = new Map(); // key -> { refs, value | null }
+      this.loaded = 0;
+      this.evicted = [];
+    }
+
+    ordinaryIndex(key) {
+      return this.ordinary.findIndex(([k]) => k === key);
+    }
+
+    ordinaryPut(key, value) {
+      const i = this.ordinaryIndex(key);
+      if (i >= 0) {
+        const [, previous] = this.ordinary.splice(i, 1)[0];
+        this.ordinary.unshift([key, value]);
+        return previous;
+      }
+      this.ordinary.unshift([key, value]);
+      if (this.ordinary.length > this.cap) this.evicted.push(this.ordinary.pop());
+      return null;
+    }
+
+    ordinaryPop(key) {
+      const i = this.ordinaryIndex(key);
+      return i >= 0 ? this.ordinary.splice(i, 1)[0][1] : null;
+    }
+
+    pin(key) {
+      if (!this.pinned.has(key)) {
+        const value = this.ordinaryPop(key);
+        if (value !== null) this.loaded += 1;
+        this.pinned.set(key, { refs: 0, value });
+      }
+      this.pinned.get(key).refs += 1;
+    }
+
+    unpin(key) {
+      const entry = this.pinned.get(key);
+      if (!entry) throw new Error("reservation must outlive its owner");
+      entry.refs -= 1;
+      if (entry.refs === 0) {
+        this.pinned.delete(key);
+        if (entry.value !== null) {
+          this.loaded -= 1;
+          this.ordinaryPut(key, entry.value);
+        }
+      }
+    }
+
+    get(key) {
+      const entry = this.pinned.get(key);
+      if (entry) return entry.value;
+      const i = this.ordinaryIndex(key);
+      if (i < 0) return null;
+      const [pair] = this.ordinary.splice(i, 1);
+      this.ordinary.unshift(pair);
+      return pair[1];
+    }
+
+    put(key, value) {
+      const entry = this.pinned.get(key);
+      if (entry) {
+        const previous = entry.value;
+        entry.value = value;
+        if (previous === null) this.loaded += 1;
+        return previous;
+      }
+      return this.ordinaryPut(key, value);
+    }
+
+    pop(key) {
+      const entry = this.pinned.get(key);
+      if (entry) {
+        const previous = entry.value;
+        entry.value = null;
+        if (previous !== null) this.loaded -= 1;
+        return previous;
+      }
+      return this.ordinaryPop(key);
+    }
+
+    clear() {
+      this.ordinary = [];
+      for (const entry of this.pinned.values()) entry.value = null;
+      this.loaded = 0;
+    }
+
+    demote(key) {
+      const i = this.ordinaryIndex(key);
+      if (i >= 0) this.ordinary.push(this.ordinary.splice(i, 1)[0]);
+    }
+
+    len() {
+      return this.ordinary.length + this.loaded;
+    }
+
+    sortedPinned() {
+      return [...this.pinned.entries()].sort(([a], [b]) => a - b);
+    }
+
+    // Applies one op, returning the label the Rust trace prints.
+    apply(op) {
+      this.evicted = [];
+      const [name, key, value] = op;
+      switch (name) {
+        case "put": return `put ${key}=${value} -> ${fmt(this.put(key, value))}`;
+        case "get": return `get ${key} -> ${fmt(this.get(key))}`;
+        case "pop": return `pop ${key} -> ${fmt(this.pop(key))}`;
+        case "pin": this.pin(key); return `pin ${key}`;
+        case "unpin": this.unpin(key); return `unpin ${key}`;
+        case "demote": this.demote(key); return `demote ${key}`;
+        case "clear": this.clear(); return "clear";
+      }
+      throw new Error(`unknown op ${name}`);
+    }
+
+    render(label) {
+      const ordinary = this.ordinary.map(([k, v]) => `${k}=${v}`).join(" ");
+      const pinned = this.sortedPinned()
+        .map(([k, e]) => `${k}=${e.value === null ? "?" : e.value}x${e.refs}`)
+        .join(" ");
+      return `${label.padEnd(22)} ordinary [${ordinary}]  pinned [${pinned}]  len ${this.len()}/${this.cap}`;
+    }
+  }
+
+  const P = (k, v) => ["put", k, v], G = (k) => ["get", k], X = (k) => ["pop", k];
+  const N = (k) => ["pin", k], U = (k) => ["unpin", k], C = ["clear"];
+
+  const scenarios = [
+    {
+      name: "overlapping requests", cap: 2,
+      about: "Two requests reserve key 1. Pressure evicts ordinary keys, never 1. A write lands in the shared slot, and the value returns to the LRU only when the last owner releases.",
+      ops: [P(1, 10), N(1), N(1), P(2, 2), P(3, 3), P(4, 4), G(1), P(1, 20), U(1), P(5, 5), U(1), P(6, 6)],
+    },
+    {
+      name: "rollback clear", cap: 2,
+      about: "Rollback clears every value but keeps both reservations. The key reads as unloaded (?), not absent, until a fresh load fills it.",
+      ops: [N(1), N(2), P(1, 10), P(2, 20), C, G(1), P(1, 30), P(3, 3), U(1), U(2)],
+    },
+    {
+      name: "large release flush", cap: 3,
+      about: "A request reserves three keys, so len reaches 6/3. Key 1 was read most recently, but releasing the request reinserts 10, 11 and 12 as newest and flushes the ordinary half.",
+      ops: [P(1, 1), P(2, 2), P(3, 3), N(10), N(11), N(12), P(10, 10), P(11, 11), P(12, 12), G(1), U(10), U(11), U(12)],
+    },
+    {
+      name: "pop while reserved", cap: 1,
+      about: "Popping a reserved key empties its slot and keeps the reservation. On release there is nothing to reinsert, so key 2 survives.",
+      ops: [P(1, 10), N(1), X(1), P(2, 20), U(1)],
+    },
+  ];
+
+  function trace(cap, ops) {
+    const cache = new PinnedLru(cap);
+    return ops.map((op) => cache.render(cache.apply(op)));
+  }
+
+  const api = { PinnedLru, scenarios, trace };
+  if (typeof module !== "undefined") module.exports = api;
+  else root.PinnedLruSim = api;
+})(this);
+</script>
+<script>
+(() => {
+  const { PinnedLru, scenarios, trace: traceLines } = window.PinnedLruSim;
+  const $ = (id) => document.getElementById(id);
+  const state = { cap: 3, ops: [], cursor: 0, about: "" };
+
+  const scenarioSelect = $("scenario");
+  scenarios.forEach((s, i) => scenarioSelect.add(new Option(`${s.name} (cap ${s.cap})`, i)));
+  scenarioSelect.add(new Option("your own operations", "custom"));
+
+  function load(index, cursor) {
+    const s = scenarios[index];
+    Object.assign(state, { cap: s.cap, ops: s.ops.slice(), cursor, about: s.about });
+    scenarioSelect.value = index;
+    $("cap").value = s.cap;
+    render();
+  }
+
+  function stateAt(cursor) {
+    const cache = new PinnedLru(state.cap);
+    let evicted = [];
+    for (const op of state.ops.slice(0, cursor)) { cache.apply(op); evicted = cache.evicted.slice(); }
+    return { cache, evicted, op: state.ops[cursor - 1] || null };
+  }
+
+  function render() {
+    const { cache, evicted, op } = stateAt(state.cursor);
+    const touched = op && op[0] !== "clear" ? op[1] : null;
+    $("about").textContent = state.about;
+
+    const slots = $("slots");
+    slots.replaceChildren();
+    for (let i = 0; i < cache.cap; i++) {
+      const el = document.createElement("div");
+      const pair = cache.ordinary[i];
+      if (pair) {
+        el.className = "slot" + (pair[0] === touched ? " touched" : "");
+        el.innerHTML = `<span class="k">${pair[0]}</span><span class="v">= ${pair[1]}</span>`;
+      } else {
+        el.className = "slot empty";
+        el.textContent = "free";
+      }
+      slots.append(el);
+    }
+
+    const ev = $("evicted");
+    ev.replaceChildren();
+    if (evicted.length) {
+      ev.append("evicted by the last step:");
+      for (const [k, v] of evicted) {
+        const c = document.createElement("span");
+        c.className = "chip";
+        c.textContent = `${k}=${v}`;
+        ev.append(c);
+      }
+    }
+
+    const cards = $("cards");
+    cards.replaceChildren();
+    const pinned = cache.sortedPinned();
+    if (!pinned.length) {
+      const n = document.createElement("span");
+      n.className = "none";
+      n.textContent = "No reservations. Every key obeys the LRU.";
+      cards.append(n);
+    }
+    for (const [k, e] of pinned) {
+      const el = document.createElement("div");
+      el.className = "card" + (e.value === null ? " unloaded" : "") + (k === touched ? " touched" : "");
+      el.innerHTML = `<span class="k">${k}</span><span class="meta"><span>${e.value === null ? "? unloaded" : "= " + e.value}</span><span>×${e.refs}</span></span>`;
+      cards.append(el);
+    }
+
+    const len = cache.len();
+    $("len").textContent = `${len}/${cache.cap}`;
+    $("len").classList.toggle("over", len > cache.cap);
+    $("ordlen").textContent = cache.ordinary.length;
+    $("loaded").textContent = cache.loaded;
+    $("reserved").textContent = pinned.length;
+    const scale = Math.max(len, cache.cap);
+    $("fill").style.width = `${(Math.min(cache.ordinary.length + cache.loaded, cache.cap) / scale) * 100}%`;
+    $("extra").style.left = `${(cache.cap / scale) * 100}%`;
+    $("extra").style.width = `${(Math.max(0, len - cache.cap) / scale) * 100}%`;
+
+    const inBoth = cache.ordinary.some(([k]) => cache.pinned.has(k));
+    const loadedCount = pinned.filter(([, e]) => e.value !== null).length;
+    const checks = [
+      [!inBoth, "each key is in the LRU or reserved, never both"],
+      [cache.ordinary.length <= cache.cap, "ordinary entries ≤ cap"],
+      [cache.loaded === loadedCount, "loaded = reservations holding a value"],
+      [len === cache.ordinary.length + cache.loaded, "len = ordinary + loaded"],
+    ];
+    $("checks").replaceChildren(...checks.map(([ok, text]) => {
+      const el = document.createElement("div");
+      el.className = "check" + (ok ? "" : " bad");
+      el.textContent = text;
+      return el;
+    }));
+
+    const trace = $("trace");
+    const lines = traceLines(state.cap, state.ops);
+    trace.replaceChildren(...lines.map((line, i) => {
+      const b = document.createElement("button");
+      b.className = "line" + (i < state.cursor ? " done" : "") + (i === state.cursor - 1 ? " current" : "");
+      b.textContent = line;
+      b.addEventListener("click", () => { state.cursor = i + 1; render(); });
+      return b;
+    }));
+    const current = trace.querySelector(".current");
+    if (current) current.scrollIntoView({ block: "nearest" });
+
+    $("back").disabled = state.cursor === 0;
+    $("step").disabled = state.cursor >= state.ops.length;
+    $("end").disabled = state.cursor >= state.ops.length;
+  }
+
+  function showError(message) {
+    $("error").hidden = !message;
+    $("error").textContent = message || "";
+  }
+
+  function custom() {
+    if (scenarioSelect.value !== "custom") {
+      scenarioSelect.value = "custom";
+      state.about = "Your own sequence. Pick a scenario to reload one.";
+    }
+  }
+
+  function run(op) {
+    const { cache } = stateAt(state.cursor);
+    try {
+      cache.apply(op);
+    } catch (e) {
+      showError(`Rust would panic: "${e.message}". Key ${op[1]} is not reserved here.`);
+      return;
+    }
+    showError(null);
+    custom();
+    state.ops = state.ops.slice(0, state.cursor).concat([op]);
+    state.cursor += 1;
+    render();
+  }
+
+  const int = (id, lo, hi) => Math.min(hi, Math.max(lo, parseInt($(id).value, 10) || 0));
+
+  document.querySelectorAll("[data-op]").forEach((b) =>
+    b.addEventListener("click", () => {
+      const name = b.dataset.op;
+      const key = int("key", 0, 99);
+      if (name === "put") run(["put", key, int("value", 0, 999)]);
+      else if (name === "clear") run(["clear"]);
+      else run([name, key]);
+    })
+  );
+
+  function fresh() {
+    showError(null);
+    custom();
+    Object.assign(state, { cap: int("cap", 1, 12), ops: [], cursor: 0 });
+    $("cap").value = state.cap;
+    render();
+  }
+  $("empty").addEventListener("click", fresh);
+  $("cap").addEventListener("change", fresh);
+
+  scenarioSelect.addEventListener("change", () => {
+    showError(null);
+    if (scenarioSelect.value === "custom") fresh();
+    else load(Number(scenarioSelect.value), 0);
+  });
+  $("step").addEventListener("click", () => { state.cursor += 1; render(); });
+  $("back").addEventListener("click", () => { state.cursor -= 1; render(); });
+  $("restart").addEventListener("click", () => { state.cursor = 0; render(); });
+  $("end").addEventListener("click", () => { state.cursor = state.ops.length; render(); });
+
+  load(2, 10);
+})();
+</script>
+</body>
+</html>

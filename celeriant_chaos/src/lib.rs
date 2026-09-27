@@ -9,6 +9,7 @@ pub mod config;
 pub mod disk_truth;
 pub mod epoch_oracle;
 pub mod final_read;
+pub mod guard_fence;
 pub mod host_poll;
 pub mod invariants;
 pub mod journal_assert;

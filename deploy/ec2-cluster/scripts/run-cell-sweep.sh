@@ -1,7 +1,7 @@
 #!/bin/bash
 # Drive a sweep of campaign cells against a deployed cluster and emit a CSV.
 #
-# A "cell" is one combination of campaign knobs (session/goal.md). This pushes each cell's
+# A "cell" is one combination of campaign knobs. This pushes each cell's
 # env to the data nodes, restarts, warms up, benchmarks, and records the result — without
 # re-copying binaries, so a cell costs a restart rather than a full deploy.
 #
@@ -12,7 +12,7 @@
 #   every cell's repetitions are symmetric about the midpoint of the run. Any monotone
 #   drift — thermal, spot-neighbour, disk fill — cancels to first order instead of being
 #   attributed to whichever cell happened to run last. Spike 1 used two monotone passes and
-#   is explicitly flagged in goal.md as needing this before anything is published.
+#   needs this comparison before publishing a performance claim.
 #
 #   Worse-of-N. Reported throughput is the MINIMUM across repetitions and reported latency
 #   the MAXIMUM, never the mean. On i4i, p99 carries a warm-up transient: reps 1-2 read

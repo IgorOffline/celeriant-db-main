@@ -9,7 +9,7 @@
 //! 6. Kill leader, wait for follower to become new leader
 //! 7. Verify new leader (former follower) still enforces the schema from its local WAL
 //!
-//! Run with: cargo run --bin schema_follower_crash_main -p celeriant_integration_tests --release
+//! Run with: cargo run --release -p celeriant_integration_tests -- --test schema_follower_crash
 
 use std::collections::HashMap;
 use std::sync::Arc;

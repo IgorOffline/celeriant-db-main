@@ -30,7 +30,7 @@
 //! the crash window between fsync and replication is the only moment where data
 //! can exist on one node but nowhere else.
 //!
-//! Run with: cargo run --bin edge_leader_crash_divergent_wal_main
+//! Run with: cargo run --release -p celeriant_integration_tests -- --test edge_wal_divergence_and_recovery
 
 use celeriant_client_tokio::celeriant_client::CeleriantClient;
 use crate::{

@@ -1,21 +1,11 @@
-//! **Layer 1 of the session-6 layer ladder: a fixed-iteration append probe.**
+//! Fixed-iteration append probe over one in-process `ShardWal`.
 //!
-//! Performs exactly `PROBE_APPENDS` appends against one in-process `ShardWal` and exits. There is
-//! no criterion here on purpose: instruction counts are near-deterministic, and criterion's
-//! warmup, sampling and outlier analysis exist to characterise a *wall-clock distribution*. The
-//! measurement is taken from outside, with `perf stat -e instructions,cycles`.
+//! Measure instructions and cycles externally with `perf stat`. WAL writes still use
+//! O_DIRECT; disabling `fdatasync` removes device flushes, not device I/O. The probe
+//! includes the amortisation coordinator and delay window, but no client, mesh or follower.
 //!
-//! **What this layer contains, stated because the obvious name for it is wrong.** It is
-//! *no device flush*, not *no device*: all WAL I/O is O_DIRECT, so `write_at` has already DMA'd
-//! to the drive before `fdatasync` is even reached (`shard_wal_sync.rs:599-603`). Layer 1 still
-//! has a device, DMA writes, the amortisation coordinator and a delay window. What it does not
-//! have is a client process, a TCP connection, the intrashard mesh, or a follower.
-//!
-//! **Read one number from one run and you will read a wrong number.** `perf stat` over a whole
-//! process counts executor spawn, io_uring setup, `tempdir`, preallocate, dict load,
-//! `ShardWal::open`, first-touch faults, `close` and teardown. All of it is fixed, so
-//! instructions/append is beautifully reproducible and systematically inflated. Run at N and 4N
-//! and take the slope; `~/s6-probe.sh` does that.
+//! Whole-process counts include setup and teardown. Run at N and 4N appends and
+//! use the slope to exclude fixed costs from the per-append estimate.
 
 use std::hint::black_box;
 use std::cell::Cell;
@@ -37,8 +27,7 @@ use bench_support::{
 };
 
 /// Production runs mimalloc (`celeriant/src/main.rs`); a bench in `celeriant_shard` would
-/// otherwise run glibc malloc. Phase 1's leading suspect is per-event allocation, and tuning
-/// that against the wrong allocator is worthless.
+/// otherwise run glibc malloc, changing the allocation costs being measured.
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 

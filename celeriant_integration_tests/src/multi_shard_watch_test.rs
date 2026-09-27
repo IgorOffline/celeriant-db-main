@@ -4,7 +4,7 @@
 //! Creates servers with multiple shards and tests fallback behavior, event merging,
 //! and explicit shard routing.
 //!
-//! Run with: cargo run --bin multi_shard_watch_test_main
+//! Run with: cargo run --release -p celeriant_integration_tests -- --test multi_shard_watch_test
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;

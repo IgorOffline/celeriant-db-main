@@ -1,4 +1,4 @@
-//! History-based consistency checkers (correctness-testing.md Phase 2).
+//! History-based consistency checkers.
 //!
 //! Pure functions over the per-op history (`celeriant_bench::history`) plus
 //! the final-read records. Each emits a `CheckResult` alongside the metric

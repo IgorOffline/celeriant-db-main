@@ -3,12 +3,15 @@
 
 mod common;
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use celeriant_client_tokio::{
-    CeleriantPool, ClientError, ClientIdentityConfig, PoolOptions,
-};
+use celeriant_client_tokio::{CeleriantPool, ClientIdentityConfig, PoolOptions};
+use celeriant_msg::process_identify::read_identify_request;
+use celeriant_wire::network::wire_header::WireHeader;
 use common::{Answer, dead_address, spawn, write_request};
+use tokio_util::compat::TokioAsyncReadCompatExt;
 
 /// Re-entering a hinted address costs one slot of `max_leader_retries` per
 /// hinting follower. With four addresses the walk burned its whole budget
@@ -67,39 +70,43 @@ async fn a_node_that_hints_at_itself_must_not_be_re_entered() {
 }
 
 #[tokio::test]
-async fn a_handshake_timeout_is_a_pre_send_failure() {
-    let listener = common::bind();
-    let addr = listener.local_addr().unwrap().to_string();
-    // Accept and hold: the identify request is never answered.
-    std::thread::spawn(move || {
-        let listener = listener;
-        listener.set_nonblocking(false).unwrap();
-        let mut held = Vec::new();
-        while let Ok((socket, _)) = listener.accept() {
-            held.push(socket);
-        }
-    });
-    let seed = spawn(Answer::Ok);
-
-    let pool = CeleriantPool::new(
-        PoolOptions::new(&addr)
+async fn a_handshake_timeout_or_eof_is_a_pre_send_failure() {
+    for (eof, explicit_identity) in [(false, false), (false, true), (true, false), (true, true)] {
+        let listener = tokio::net::TcpListener::from_std(common::bind()).unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let identifies = Arc::new(AtomicUsize::new(0));
+        let counted = identifies.clone();
+        // Reads each Identify, then closes (EOF) or holds the socket unanswered (timeout).
+        let primary = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                let mut stream = socket.compat();
+                let header = WireHeader::from_reader(&mut stream, 1024 * 1024).await.unwrap();
+                read_identify_request(header, &mut stream).await.unwrap();
+                counted.fetch_add(1, Ordering::SeqCst);
+                if !eof {
+                    held.push(stream);
+                }
+            }
+        });
+        let seed = spawn(Answer::Ok);
+        let mut options = PoolOptions::new(&addr)
             .with_seed_addresses(vec![seed.addr.to_string()])
-            .with_identity(ClientIdentityConfig::from_api_key("k"))
             .with_connection_timeout(Duration::from_secs(5))
-            .with_request_timeout(Duration::from_millis(300)),
-    );
+            .with_request_timeout(Duration::from_millis(300));
+        if explicit_identity {
+            options = options.with_identity(ClientIdentityConfig::from_api_key("k"));
+        }
+        let pool = CeleriantPool::new(options);
 
-    let err = tokio::time::timeout(
-        Duration::from_secs(10),
-        pool.write(write_request(5, vec![7])),
-    )
-    .await
-    .expect("the handshake timeout must not hang")
-    .expect_err("the handshake never completes");
-
-    assert!(
-        !matches!(err, ClientError::RequestTimeout),
-        "a write that was never serialised must not be reported as an ambiguous \
-         request timeout, got: {err:?}"
-    );
+        tokio::time::timeout(Duration::from_secs(10), pool.write(write_request(5, vec![7])))
+            .await
+            .expect("the handshake failure must not hang")
+            .unwrap_or_else(|error| {
+                panic!("eof={eof} explicit_identity={explicit_identity}: a pre-send handshake failure must allow the healthy seed to serve the write: {error:?}")
+            });
+        assert_eq!(seed.requests(), 1, "the healthy seed receives the mutation exactly once");
+        assert!(identifies.load(Ordering::SeqCst) > 0, "the primary must receive an Identify");
+        primary.abort();
+    }
 }

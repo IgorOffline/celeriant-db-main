@@ -8,7 +8,7 @@
 //! 4. Enforcement mode: unidentified client rejected
 //! 5. Enforcement mode: identified client succeeds
 //!
-//! Run with: cargo run --bin identity_test_main
+//! Run with: cargo run --release -p celeriant_integration_tests -- --test identity_test
 
 use std::collections::HashMap;
 use std::sync::Arc;

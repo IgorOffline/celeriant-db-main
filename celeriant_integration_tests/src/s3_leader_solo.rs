@@ -16,7 +16,7 @@
 //! 9. Write events 4-6 (TCP replication, follower is connected)
 //! 10. Verify both nodes have all 6 events, no new S3 fallback objects
 //!
-//! Run with: cargo run --bin s3_leader_solo_main
+//! Run with: cargo run --release -p celeriant_integration_tests -- --test s3_leader_solo
 
 use celeriant_client_tokio::celeriant_client::CeleriantClient;
 use crate::{count_events, poll_converged_count, s3_cluster_config, write_event, MinioContainer, TestServer, FOLLOWER_CONVERGENCE_TIMEOUT};

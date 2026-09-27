@@ -16,7 +16,7 @@ use celeriant_wal::aggregate_key::AggregateKey;
 use celeriant_wal::builtin_dict::BUILTIN_DICT_BYTES;
 use celeriant_wal::datablocks::datablock_aggregate_event::DatablockAggregateEvent;
 use celeriant_wire::codec::compression::DictCodec;
-use celeriant_wire::network::wire_header::{PROTOCOL_VERSION_V2, WireHeader};
+use celeriant_wire::network::wire_header::{PROTOCOL_VERSION_V4, WireHeader};
 use tokio_util::compat::TokioAsyncReadCompatExt;
 
 const MAX: u64 = 64 * 1024 * 1024;
@@ -119,7 +119,7 @@ async fn connection(socket: tokio::net::TcpStream, answer: Answer, requests: Arc
     let mut stream = socket.compat();
     let codec = DictCodec::new(BUILTIN_DICT_BYTES, 3).unwrap();
     loop {
-        let Ok(header) = WireHeader::from_reader(&mut stream, MAX).await else {
+        let Ok(header) = request_header(&mut stream, MAX).await else {
             return;
         };
         let Ok(request) = ClientRequest::read_from_header(header, &mut stream, &codec).await else {
@@ -151,7 +151,7 @@ async fn connection(socket: tokio::net::TcpStream, answer: Answer, requests: Arc
             }),
         };
         if ClientResponse::write_response(
-            &mut stream, &resp, false, &codec, MAX, PROTOCOL_VERSION_V2,
+            &mut stream, &resp, false, &codec, MAX, PROTOCOL_VERSION_V4,
         )
         .await
         .is_err()
@@ -199,4 +199,25 @@ pub fn incompressible(len: usize) -> Vec<u8> {
             state as u8
         })
         .collect()
+}
+use celeriant_msg::process_identify::{read_identify_request, write_identify_response, IDENTIFY_REQUEST_TYPE_ID};
+use celeriant_msg::response::responses::IdentifyResponse;
+use celeriant_wire::network::wire_error::WireError;
+use futures_lite::{AsyncReadExt, AsyncWriteExt};
+
+pub async fn request_header<S: AsyncReadExt + AsyncWriteExt + Unpin>(stream: &mut S, max: u64) -> Result<WireHeader, WireError> {
+    let header = WireHeader::from_reader(stream, max).await?;
+    if header.message_type != IDENTIFY_REQUEST_TYPE_ID {
+        return Ok(header);
+    }
+    assert_eq!(header.version, PROTOCOL_VERSION_V4);
+    let request = read_identify_request(header, stream).await.unwrap();
+    write_identify_response(stream, &IdentifyResponse {
+        correlation_id: request.correlation_id,
+        client_id: None,
+        access_level: None,
+        compression_dict_sha256: None,
+        compression_dict_bytes: None,
+    }, PROTOCOL_VERSION_V4).await.unwrap();
+    WireHeader::from_reader(stream, max).await
 }

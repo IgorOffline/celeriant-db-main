@@ -74,7 +74,7 @@ dependencies = [
 
 [[package]]
 name = "celeriant_msg"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "bincode",
  "celeriant_wal",
@@ -86,7 +86,7 @@ dependencies = [
 
 [[package]]
 name = "celeriant_wal"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "bincode",
  "deepsize",
@@ -99,7 +99,7 @@ dependencies = [
 
 [[package]]
 name = "celeriant_wire"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "bincode",
  "celeriant_wal",

@@ -3,7 +3,7 @@
 //! End-to-end tests for schema registration, write-path validation,
 //! duplicate rejection, invalid schema rejection, and WAL recovery after restart.
 //!
-//! Run with: cargo run --bin schema_validation_main -p celeriant_integration_tests --release
+//! Run with: cargo run -p celeriant_integration_tests --release -- --test schema_validation
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -11,6 +11,7 @@ use std::sync::Arc;
 use celeriant_client_tokio::celeriant_client::CeleriantClient;
 use celeriant_client_tokio::client_error::ClientError;
 use crate::{ServerConfig, TestServer};
+use crate::common::read_all;
 use celeriant_msg::{
     process_client_requests::ClientRequest,
     request::requests::{RegisterSchemaRequest, SingleAggregateWrite, WriteRequest},
@@ -249,6 +250,18 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     client.send_request(&req).await?;
     println!("  PASS\n");
 
+    let duplicate_avro = ClientRequest::RegisterSchema(RegisterSchemaRequest {
+        correlation_id: None, client_id: CLIENT_ID, user_id: None,
+        schema_key: SchemaKey::new(1, 100, 3, 0), schema_type: 1, schema: avro_schema.clone(),
+    });
+    expect_schema_already_exists(client.send_request(&duplicate_avro).await);
+    let invalid_avro = ClientRequest::RegisterSchema(RegisterSchemaRequest {
+        correlation_id: None, client_id: CLIENT_ID, user_id: None,
+        schema_key: SchemaKey::new(1, 100, 9, 0), schema_type: 1,
+        schema: r#"{"type":"not-a-real-avro-type"}"#.into(),
+    });
+    expect_schema_invalid(client.send_request(&invalid_avro).await);
+
     // Test 9a: Write valid Avro-encoded event
     println!("Test 9a: Write valid Avro event against Avro schema");
     let avro_parsed = apache_avro::Schema::parse_str(&avro_schema).unwrap();
@@ -330,6 +343,34 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let req = write_event(&agg2, 1, 99, b"anything goes", 0, true);
     client.send_request(&req).await?;
     println!("  PASS\n");
+
+    for (major, payload) in [(1u64, wrong_type.as_slice()), (3, &[0x80][..]), (4, &[0x0a, 0x05, 0xff][..])] {
+        let absent = AggregateKey::new(1, 100, 100 + u128::from(major));
+        expect_schema_validation_failed(client.send_request(&write_event(&absent, major, 0, payload, 0, true)).await);
+        match client.read(celeriant_msg::request::requests::ReadRequest {
+            correlation_id: None, aggregate_key: absent,
+            filters: celeriant_msg::request::read_filters::ReadFilters::new(1),
+        }).await {
+            Err(ClientError::Server(celeriant_client_tokio::ServerError::Read {
+                kind: celeriant_client_tokio::ReadError::AggregateNotExists, ..
+            })) => {},
+            other => return Err(format!("rejected schema write created an aggregate: {other:?}").into()),
+        }
+    }
+    for (key, expected, minor) in [
+        (&agg, vec![valid_json.as_slice(), valid_json.as_slice()], 0),
+        (&agg3, vec![valid_avro.as_slice()], 0),
+        (&agg4, vec![valid_proto.as_slice()], 0),
+        (&agg2, vec![b"anything goes".as_slice()], 99),
+    ] {
+        let batches = read_all(&mut client, key).await?;
+        let events: Vec<_> = batches.iter().flat_map(|batch| &batch.events).collect();
+        assert_eq!(events.len(), expected.len(), "aggregate {key:?}");
+        for (event, bytes) in events.iter().zip(expected) {
+            assert_eq!(event.event_value.as_slice(), bytes, "aggregate {key:?}");
+            assert_eq!(event.event_type_minor, minor, "aggregate {key:?}");
+        }
+    }
 
     // --- Phase 2: WAL recovery after restart (tests bloom filter + reverse scan) ---
     println!("--- Phase 2: Schema survives restart ---\n");

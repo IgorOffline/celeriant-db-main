@@ -15,6 +15,7 @@ use crate::{
         AggregateDetailsResponse, DeleteResponse, ErrorResponse, ListAggregateTypesResponse,
         ListAggregatesResponse, ListOrgsResponse, ProtocolErrorResponse, ReadResponse,
         RegisterSchemaResponse, TrimStartResponse, WatchResponse, WriteResponse,
+        WriteConflictResponse, DeleteConflictResponse,
     },
 };
 
@@ -33,6 +34,8 @@ pub enum ClientResponseType {
     ListAggregateTypes = 10,
     ListAggregates = 11,
     RegisterSchema = 12,
+    WriteConflict = 13,
+    DeleteConflict = 14,
 }
 
 impl ClientResponseType {
@@ -50,6 +53,8 @@ impl ClientResponseType {
             10 => Ok(ClientResponseType::ListAggregateTypes),
             11 => Ok(ClientResponseType::ListAggregates),
             12 => Ok(ClientResponseType::RegisterSchema),
+            13 => Ok(ClientResponseType::WriteConflict),
+            14 => Ok(ClientResponseType::DeleteConflict),
             _ => Err(ReadWireDataError::UnknownMessageType(value)),
         }
     }
@@ -69,6 +74,8 @@ pub enum ClientResponse {
     ListAggregateTypes(ListAggregateTypesResponse),
     ListAggregates(ListAggregatesResponse),
     RegisterSchema(RegisterSchemaResponse),
+    WriteConflict(WriteConflictResponse),
+    DeleteConflict(DeleteConflictResponse),
 }
 
 impl ClientResponse {
@@ -87,6 +94,8 @@ impl ClientResponse {
             ClientResponse::ListAggregateTypes(_) => ClientResponseType::ListAggregateTypes,
             ClientResponse::ListAggregates(_) => ClientResponseType::ListAggregates,
             ClientResponse::RegisterSchema(_) => ClientResponseType::RegisterSchema,
+            ClientResponse::WriteConflict(_) => ClientResponseType::WriteConflict,
+            ClientResponse::DeleteConflict(_) => ClientResponseType::DeleteConflict,
         }
     }
 
@@ -103,6 +112,8 @@ impl ClientResponse {
             ClientResponse::ListAggregateTypes(r) => r.correlation_id,
             ClientResponse::ListAggregates(r) => r.correlation_id,
             ClientResponse::RegisterSchema(r) => r.correlation_id,
+            ClientResponse::WriteConflict(r) => r.correlation_id,
+            ClientResponse::DeleteConflict(r) => r.correlation_id,
             ClientResponse::Watch(_) | ClientResponse::ProtocolError(_) => None,
         }
     }
@@ -163,6 +174,8 @@ impl ClientResponse {
             ClientResponseType::ListOrgs => variable_uncompressed!(ListOrgs),
             ClientResponseType::ListAggregateTypes => variable_uncompressed!(ListAggregateTypes),
             ClientResponseType::ListAggregates => variable_uncompressed!(ListAggregates),
+            ClientResponseType::WriteConflict => variable_uncompressed!(WriteConflict),
+            ClientResponseType::DeleteConflict => variable_uncompressed!(DeleteConflict),
         })
     }
 
@@ -187,6 +200,8 @@ impl ClientResponse {
         let result = match response_type {
             ClientResponseType::AggregateDetails => ClientResponse::AggregateDetails(deserialise_versioned(body, version).map_err(mb)?),
             ClientResponseType::Write => ClientResponse::Write(deserialise_versioned(body, version).map_err(mb)?),
+            ClientResponseType::WriteConflict => ClientResponse::WriteConflict(deserialise_versioned(body, version).map_err(mb)?),
+            ClientResponseType::DeleteConflict => ClientResponse::DeleteConflict(deserialise_versioned(body, version).map_err(mb)?),
             ClientResponseType::TrimStart => ClientResponse::TrimStart(deserialise_versioned(body, version).map_err(mb)?),
             ClientResponseType::Delete => ClientResponse::Delete(deserialise_versioned(body, version).map_err(mb)?),
             ClientResponseType::ProtocolError => ClientResponse::ProtocolError(deserialise_versioned(body, version).map_err(mb)?),
@@ -224,6 +239,8 @@ impl ClientResponse {
             ClientResponse::GenericError(res) => wire_header_write_fixed_size(writer, res, response_type_id, version).await,
             ClientResponse::RegisterSchema(res) => wire_header_write_fixed_size(writer, res, response_type_id, version).await,
             // Variable-size responses: serialise once, decide compression from payload size, write frame.
+            ClientResponse::WriteConflict(res) => write_variable_with_threshold(writer, res, response_type_id, client_has_dict, dict_codec, max_message_size, version).await,
+            ClientResponse::DeleteConflict(res) => write_variable_with_threshold(writer, res, response_type_id, client_has_dict, dict_codec, max_message_size, version).await,
             ClientResponse::Read(res) => write_variable_with_threshold(writer, res, response_type_id, client_has_dict, dict_codec, max_message_size, version).await,
             ClientResponse::Watch(res) => write_variable_with_threshold(writer, res, response_type_id, client_has_dict, dict_codec, max_message_size, version).await,
             ClientResponse::ListOrgs(res) => write_variable_with_threshold(writer, res, response_type_id, client_has_dict, dict_codec, max_message_size, version).await,
@@ -251,7 +268,9 @@ pub fn determine_compression_type(
         | ClientResponse::Watch(_)
         | ClientResponse::ListOrgs(_)
         | ClientResponse::ListAggregateTypes(_)
-        | ClientResponse::ListAggregates(_) => {}
+        | ClientResponse::ListAggregates(_)
+        | ClientResponse::WriteConflict(_)
+        | ClientResponse::DeleteConflict(_) => {}
     }
 
     compression_policy(payload_size, client_has_dict)
@@ -285,24 +304,33 @@ where
     use celeriant_wire::{
         codec::{bincode as wire_bincode, msgpack as wire_msgpack},
         network::wire_header::{
-            WIRE_HEADER_SIZE, WIRE_FIXED_BODY_SIZE, PROTOCOL_VERSION_V2, PROTOCOL_VERSION_V3,
+            WIRE_HEADER_SIZE, WIRE_FIXED_BODY_SIZE, PROTOCOL_VERSION_V4, PROTOCOL_VERSION_V5,
             checked_u32_len,
         },
     };
 
     let uncompressed: Vec<u8> = match version {
-        PROTOCOL_VERSION_V2 => wire_bincode::fixed_serialise_heap(message)?,
-        PROTOCOL_VERSION_V3 => wire_msgpack::serialise_heap(message)?,
+        PROTOCOL_VERSION_V4 => wire_bincode::fixed_serialise_heap(message)?,
+        PROTOCOL_VERSION_V5 => wire_msgpack::serialise_heap(message)?,
         _ => return Err(WireError::UnsupportedProtocol(version)),
     };
 
     let payload_size = uncompressed.len();
 
-    let compression_type = compression_policy(payload_size, client_has_dict);
-
-    let data: Vec<u8> = match compression_type {
-        CompressionType::None => uncompressed,
-        CompressionType::ZstdDict => dict_codec.compress(&uncompressed).map_err(WireError::from)?,
+    if payload_size as u64 > max_message_size {
+        return Err(WireError::MessageTooLarge { message_length: payload_size as u64, max_size_bytes: max_message_size });
+    }
+    let mut compression_type = compression_policy(payload_size, client_has_dict);
+    let data = if compression_type == CompressionType::ZstdDict {
+        let compressed = dict_codec.compress(&uncompressed).map_err(WireError::from)?;
+        if compressed.len() as u64 <= max_message_size {
+            compressed
+        } else {
+            compression_type = CompressionType::None;
+            uncompressed
+        }
+    } else {
+        uncompressed
     };
 
     let compressed_size = checked_u32_len(data.len())?;
@@ -349,13 +377,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::response::responses::{AggregateListItem, OrgListItem};
-    use celeriant_wire::network::wire_header::{PROTOCOL_VERSION_V2, PROTOCOL_VERSION_V3, WIRE_HEADER_SIZE};
+    use crate::response::responses::{AggregateConflict, AggregateListItem, OrgListItem};
+    use celeriant_wire::network::wire_header::{PROTOCOL_VERSION_V4, PROTOCOL_VERSION_V5, WIRE_HEADER_SIZE};
     use futures_lite::{future::block_on, io::Cursor};
 
-    const COUNT: usize = 12;
-    const MAX_ID: u32 = 12;
-    const VERSIONS: [u32; 2] = [PROTOCOL_VERSION_V2, PROTOCOL_VERSION_V3];
+    const COUNT: usize = 14;
+    const MAX_ID: u32 = 14;
+    const VERSIONS: [u32; 2] = [PROTOCOL_VERSION_V4, PROTOCOL_VERSION_V5];
 
     fn all_types() -> [ClientResponseType; COUNT] {
         [
@@ -371,11 +399,15 @@ mod tests {
             ClientResponseType::ListAggregateTypes,
             ClientResponseType::ListAggregates,
             ClientResponseType::RegisterSchema,
+            ClientResponseType::WriteConflict,
+            ClientResponseType::DeleteConflict,
         ]
     }
 
     fn make_response(rt: ClientResponseType) -> ClientResponse {
         match rt {
+            ClientResponseType::WriteConflict => ClientResponse::WriteConflict(WriteConflictResponse {correlation_id: Some(1), conflicts: vec![AggregateConflict {key: celeriant_wal::aggregate_key::AggregateKey::new(1,2,3), expected: 1, current: 2}]}),
+            ClientResponseType::DeleteConflict => ClientResponse::DeleteConflict(DeleteConflictResponse {correlation_id: Some(1), conflicts: vec![AggregateConflict {key: celeriant_wal::aggregate_key::AggregateKey::new(1,2,3), expected: 1, current: 2}]}),
             ClientResponseType::AggregateDetails => ClientResponse::AggregateDetails(AggregateDetailsResponse {
                 correlation_id: Some(0xDEAD_BEEF_CAFE_BABE),
                 min_aggregate_version: 42,
@@ -434,7 +466,9 @@ mod tests {
     fn is_variable_size(rt: ClientResponseType) -> bool {
         matches!(
             rt,
-            ClientResponseType::Read
+            ClientResponseType::WriteConflict
+                | ClientResponseType::DeleteConflict
+                | ClientResponseType::Read
                 | ClientResponseType::Watch
                 | ClientResponseType::ListOrgs
                 | ClientResponseType::ListAggregateTypes
@@ -469,12 +503,12 @@ mod tests {
         for rt in all_types() {
             assert_eq!(ClientResponseType::from_u32(rt as u32).unwrap(), rt);
         }
-        for id in 1..=12 {
+        for id in 1..=14 {
             assert!(ClientResponseType::from_u32(id).is_ok(), "missing id {}", id);
         }
-        // IDs 13-99 reserved for future client responses
+        // IDs 15-99 reserved for future client responses
         // Cluster response IDs start at 100+
-        for id in 13..=20 {
+        for id in 15..=20 {
             assert!(ClientResponseType::from_u32(id).is_err(), "id {} should not parse as ClientResponseType yet", id);
         }
         assert!(ClientResponseType::from_u32(0).is_err());
@@ -507,7 +541,7 @@ mod tests {
         block_on(async {
             for rt in all_types() {
                 let res = make_response(rt);
-                let bytes = write_bytes(&res, PROTOCOL_VERSION_V2).await;
+                let bytes = write_bytes(&res, PROTOCOL_VERSION_V4).await;
                 let compression_byte = bytes[16];
                 if is_variable_size(rt) {
                     assert!(compression_byte == 0 || compression_byte > 0, "{:?} should use variable path", rt);
@@ -618,7 +652,7 @@ mod tests {
     fn size_limit_rejects_oversized() {
         block_on(async {
             let res = make_response(ClientResponseType::Read);
-            let bytes = write_bytes(&res, PROTOCOL_VERSION_V2).await;
+            let bytes = write_bytes(&res, PROTOCOL_VERSION_V4).await;
             let result = ClientResponse::read_response(&mut Cursor::new(bytes), 1).await;
             assert!(result.is_err(), "should reject when max_size < body size");
         });
@@ -628,7 +662,7 @@ mod tests {
     fn truncated_stream_fails() {
         block_on(async {
             let res = make_response(ClientResponseType::AggregateDetails);
-            let bytes = write_bytes(&res, PROTOCOL_VERSION_V2).await;
+            let bytes = write_bytes(&res, PROTOCOL_VERSION_V4).await;
 
             for truncate_at in [0, 10, bytes.len() - 1] {
                 let truncated = &bytes[..truncate_at];
@@ -642,7 +676,7 @@ mod tests {
     fn invalid_message_type_fails() {
         block_on(async {
             let res = make_response(ClientResponseType::AggregateDetails);
-            let mut bytes = write_bytes(&res, PROTOCOL_VERSION_V2).await;
+            let mut bytes = write_bytes(&res, PROTOCOL_VERSION_V4).await;
 
             bytes[4..8].copy_from_slice(&(MAX_ID + 1).to_le_bytes());
             let result = ClientResponse::read_response(&mut Cursor::new(bytes), u64::MAX).await;
@@ -678,12 +712,12 @@ mod tests {
             });
 
             // No compression: cluster algorithm None.
-            let bytes = write_bytes(&res, PROTOCOL_VERSION_V2).await;
+            let bytes = write_bytes(&res, PROTOCOL_VERSION_V4).await;
             let parsed = read_back(&bytes).await;
             assert_eq!(parsed.response_type(), ClientResponseType::ListAggregates);
 
-            // V3 no compression.
-            let bytes = write_bytes(&res, PROTOCOL_VERSION_V3).await;
+            // V5 no compression.
+            let bytes = write_bytes(&res, PROTOCOL_VERSION_V5).await;
             let parsed = read_back(&bytes).await;
             assert_eq!(parsed.response_type(), ClientResponseType::ListAggregates);
         });
@@ -744,7 +778,7 @@ mod tests {
             });
             let mut buf = Vec::new();
             let err = ClientResponse::write_response(
-                &mut buf, &compressible, true, &test_codec(), TINY_MAX, PROTOCOL_VERSION_V2,
+                &mut buf, &compressible, true, &test_codec(), TINY_MAX, PROTOCOL_VERSION_V4,
             )
             .await
             .expect_err("a compressible body past max_message_size must be rejected");

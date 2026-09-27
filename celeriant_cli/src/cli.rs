@@ -57,7 +57,7 @@ pub enum Commands {
     /// Read events from an aggregate
     Read(ReadArgs),
 
-    /// Write events to an aggregate
+    /// Write events to an aggregate. Atomic cross-aggregate guards use the client multi-entry API.
     Write(WriteArgs),
 
     /// Trim events from the start of an aggregate
@@ -407,4 +407,3 @@ pub enum OutputFormat {
     Json,
     Compact,
 }
-

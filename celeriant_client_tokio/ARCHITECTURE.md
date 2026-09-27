@@ -37,7 +37,7 @@ Watch:
 ## Invariants
 
 - TCP_NODELAY is always set. Nagle buffering is never permitted.
-- Protocol version is set on the first message (Identify or first ClientRequest). No renegotiation.
+- Client protocol 4 (bincode) is checked by Identify before the first operation, including unauthenticated connections, and pinned for every response. No renegotiation or downgrade.
 - Pool idle timeout (25s) must be shorter than the server's `slow_client_timeout` (30s) to prevent server-side disconnects.
 - Broken connections are discarded, never returned to the pool.
 - `identify()` handshake runs after connection establishment and before data operations.
@@ -171,3 +171,9 @@ An aggregate can appear on multiple shards (replicated or migrated). `AggregateS
 ### Strongly-typed server errors
 
 Server error responses are parsed into operation-specific enums (`ReadError`, `WriteError`, `SchemaError`, `DeleteError`, `TrimError`, `WatchError`, `DetailsError`, `AuthError`) rather than exposing raw error codes. Each variant carries structured context (e.g., `OptimisticConcurrencyViolation` includes both expected and current batch indices). Three `ClientError` variants are promoted for routing: `NotLeader`, `IdentityRequired`, and `ServerBusy`.
+
+## Atomic write guards and typed conflicts
+
+`WriteBatch` collects distinct aggregate keys for a client or pool. Guards are empty writes with expected versions and both forbidden flags disabled. Duplicate builder keys fail before submission. The transport checks the shared response reservation against its receive ceiling before writing or deleting.
+
+Dedicated write/delete conflict responses become the existing server error hierarchy with a complete `Vec<AggregateConflict>` and first-conflict scalar fields. Correlation and operation checks precede that mapping. Generic errors carrying OCC codes are protocol failures. Valid OCC responses preserve connection reuse; malformed frames and incompatible versions retire connections and cannot trigger mutation replay.

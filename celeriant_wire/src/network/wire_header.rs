@@ -5,8 +5,8 @@ use serde::Serialize;
 
 use crate::{codec, codec::compression::DictCodec, network::wire_error::WireError};
 
-pub const PROTOCOL_VERSION_V2: u32 = 2;
-pub const PROTOCOL_VERSION_V3: u32 = 3;
+pub const PROTOCOL_VERSION_V4: u32 = 4;
+pub const PROTOCOL_VERSION_V5: u32 = 5;
 pub const WIRE_HEADER_SIZE: usize = 17;
 pub const WIRE_FIXED_BODY_SIZE: usize = 1024 - WIRE_HEADER_SIZE;
 
@@ -39,7 +39,7 @@ impl WireHeader {
 
         let version = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
         match version {
-            PROTOCOL_VERSION_V2 | PROTOCOL_VERSION_V3 => {}
+            PROTOCOL_VERSION_V4 | PROTOCOL_VERSION_V5 => {}
             _ => return Err(WireError::UnsupportedProtocol(version)),
         }
 
@@ -160,8 +160,8 @@ where
     T: Decode<()> + serde::de::DeserializeOwned,
 {
     match version {
-        PROTOCOL_VERSION_V2 => Ok(codec::bincode::fixed_deserialise(bytes)?),
-        PROTOCOL_VERSION_V3 => Ok(codec::msgpack::deserialise(bytes)?),
+        PROTOCOL_VERSION_V4 => Ok(codec::bincode::fixed_deserialise(bytes)?),
+        PROTOCOL_VERSION_V5 => Ok(codec::msgpack::deserialise(bytes)?),
         _ => Err(WireError::UnsupportedProtocol(version)),
     }
 }
@@ -172,8 +172,8 @@ where
     T: Encode + Serialize,
 {
     match version {
-        PROTOCOL_VERSION_V2 => Ok(codec::bincode::fixed_serialise_heap(message)?),
-        PROTOCOL_VERSION_V3 => Ok(codec::msgpack::serialise_heap(message)?),
+        PROTOCOL_VERSION_V4 => Ok(codec::bincode::fixed_serialise_heap(message)?),
+        PROTOCOL_VERSION_V5 => Ok(codec::msgpack::serialise_heap(message)?),
         _ => Err(WireError::UnsupportedProtocol(version)),
     }
 }
@@ -230,8 +230,8 @@ where
         written: 0,
     };
     match protocol_version {
-        PROTOCOL_VERSION_V2 => codec::bincode::fixed_serialise_writer(message, &mut body)?,
-        PROTOCOL_VERSION_V3 => codec::msgpack::serialise_writer(message, &mut body)?,
+        PROTOCOL_VERSION_V4 => codec::bincode::fixed_serialise_writer(message, &mut body)?,
+        PROTOCOL_VERSION_V5 => codec::msgpack::serialise_writer(message, &mut body)?,
         _ => return Err(WireError::UnsupportedProtocol(protocol_version)),
     }
     let body_size = body.written;
@@ -473,9 +473,9 @@ mod tests {
     // ==================== version validation ====================
 
     #[test]
-    fn from_reader_accepts_v2_and_v3() {
+    fn from_reader_accepts_v4_and_v5() {
         block_on(async {
-            for version in [2u32, 3] {
+            for version in [PROTOCOL_VERSION_V4, PROTOCOL_VERSION_V5] {
                 let header_bytes = make_header(version, 1, 100, 100, 0);
                 let mut reader = Cursor::new(header_bytes);
                 let header = WireHeader::from_reader(&mut reader, MAX_SIZE).await.expect("from_reader");
@@ -487,7 +487,7 @@ mod tests {
     #[test]
     fn from_reader_rejects_unsupported_versions() {
         block_on(async {
-            for version in [0u32, 1, 4] {
+            for version in [0u32, 1, 2, 3, 6, u32::MAX] {
                 let header_bytes = make_header(version, 1, 100, 100, 0);
                 let mut reader = Cursor::new(header_bytes);
                 let err = WireHeader::from_reader(&mut reader, MAX_SIZE).await.expect_err("must reject");
@@ -511,7 +511,7 @@ mod tests {
     fn from_reader_rejects_large_lengths() {
         block_on(async {
             for (compressed, uncompressed) in [(1_000_000u32, 100u32), (100, 1_000_000)] {
-                let header_bytes = make_header(2, 1, compressed, uncompressed, 0);
+                let header_bytes = make_header(PROTOCOL_VERSION_V4, 1, compressed, uncompressed, 0);
                 let mut reader = Cursor::new(header_bytes);
                 let err = WireHeader::from_reader(&mut reader, 1000).await.expect_err("must reject");
                 assert!(matches!(err, WireError::MessageTooLarge { .. }));
@@ -525,7 +525,7 @@ mod tests {
     #[test]
     fn from_reader_rejects_decompression_bomb() {
         block_on(async {
-            let header_bytes = make_header(2, 1, 10, 10_000_000, 1);
+            let header_bytes = make_header(PROTOCOL_VERSION_V4, 1, 10, 10_000_000, 1);
             let mut reader = Cursor::new(header_bytes);
             let err = WireHeader::from_reader(&mut reader, MAX_SIZE).await.expect_err("must reject");
             assert!(matches!(err, WireError::MessageTooLarge { message_length, .. } if message_length == 10_000_000));
@@ -536,7 +536,7 @@ mod tests {
     fn from_reader_rejects_none_with_mismatched_lengths() {
         block_on(async {
             for (compressed, uncompressed) in [(100u32, 200u32), (200, 100)] {
-                let header_bytes = make_header(2, 1, compressed, uncompressed, 0);
+                let header_bytes = make_header(PROTOCOL_VERSION_V4, 1, compressed, uncompressed, 0);
                 let mut reader = Cursor::new(header_bytes);
                 let err = WireHeader::from_reader(&mut reader, MAX_SIZE).await.expect_err("must reject");
                 assert!(matches!(err, WireError::MalformedFrame(_)));
@@ -549,7 +549,7 @@ mod tests {
     #[test]
     fn fixed_size_roundtrip_v2_and_v3() {
         block_on(async {
-            for &version in &[PROTOCOL_VERSION_V2, PROTOCOL_VERSION_V3] {
+            for &version in &[PROTOCOL_VERSION_V4, PROTOCOL_VERSION_V5] {
                 let result: u64 = roundtrip_fixed(&12345u64, 1, version).await;
                 assert_eq!(result, 12345);
             }
@@ -560,7 +560,7 @@ mod tests {
     fn read_fixed_size_rejects_compressed_frame() {
         block_on(async {
             // Hand-craft a header that claims ZstdDict compression on a fixed-size body.
-            let mut data = make_header(2, 1, 10, 10, 1);
+            let mut data = make_header(PROTOCOL_VERSION_V4, 1, 10, 10, 1);
             data.extend_from_slice(&[0u8; 10]);
             let mut reader = Cursor::new(data);
             let header = WireHeader::from_reader(&mut reader, MAX_SIZE).await.expect("from_reader");
@@ -573,7 +573,7 @@ mod tests {
     fn read_fixed_size_rejects_body_past_stack_buffer() {
         block_on(async {
             let oversize = (WIRE_FIXED_BODY_SIZE + 1) as u32;
-            let header_bytes = make_header(2, 1, oversize, oversize, 0);
+            let header_bytes = make_header(PROTOCOL_VERSION_V4, 1, oversize, oversize, 0);
             let mut reader = Cursor::new(header_bytes);
             let header = WireHeader::from_reader(&mut reader, MAX_SIZE).await.expect("from_reader");
             let result: Result<u64, _> = header.read_fixed_size(&mut reader).await;
@@ -586,7 +586,7 @@ mod tests {
     #[test]
     fn variable_size_uncompressed_roundtrip() {
         block_on(async {
-            for &version in &[PROTOCOL_VERSION_V2, PROTOCOL_VERSION_V3] {
+            for &version in &[PROTOCOL_VERSION_V4, PROTOCOL_VERSION_V5] {
                 let msg = vec![42u8; 2000];
                 let result: Vec<u8> = roundtrip_variable_uncompressed(&msg, 1, version).await;
                 assert_eq!(result, msg);
@@ -601,7 +601,7 @@ mod tests {
             let msg = vec![42u8; 2000];
             let mut buf = Vec::new();
             wire_header_write_variable_size_with_codec(
-                &mut buf, &msg, 1, CompressionType::ZstdDict, MAX_SIZE, PROTOCOL_VERSION_V2, &codec,
+                &mut buf, &msg, 1, CompressionType::ZstdDict, MAX_SIZE, PROTOCOL_VERSION_V4, &codec,
             ).await.expect("write_with_codec");
             let mut reader = Cursor::new(buf);
             let header = WireHeader::from_reader(&mut reader, MAX_SIZE).await.expect("from_reader");
@@ -617,7 +617,7 @@ mod tests {
         block_on(async {
             for compression in [CompressionType::None, CompressionType::ZstdDict] {
                 let msg = vec![42u8; 2000];
-                let result: Vec<u8> = roundtrip_variable_with_codec(&msg, 1, compression, PROTOCOL_VERSION_V2).await;
+                let result: Vec<u8> = roundtrip_variable_with_codec(&msg, 1, compression, PROTOCOL_VERSION_V4).await;
                 assert_eq!(result, msg);
             }
         });
@@ -633,13 +633,13 @@ mod tests {
             let codec = test_codec();
             let original = vec![42u8; 2000];
             // The codec read path will deserialise, so serialise first then compress.
-            let serialised = serialise_heap_versioned(&original, PROTOCOL_VERSION_V2).expect("serialise");
+            let serialised = serialise_heap_versioned(&original, PROTOCOL_VERSION_V4).expect("serialise");
             let compressed = codec.compress(&serialised).expect("compress");
             let uncompressed_size = serialised.len() as u32;
 
             let mut buf = Vec::new();
             wire_header_write_variable_size_raw(
-                &mut buf, &compressed, 1, CompressionType::ZstdDict, uncompressed_size, MAX_SIZE, PROTOCOL_VERSION_V2,
+                &mut buf, &compressed, 1, CompressionType::ZstdDict, uncompressed_size, MAX_SIZE, PROTOCOL_VERSION_V4,
             ).await.expect("write_raw");
 
             let mut reader = Cursor::new(buf);
@@ -659,7 +659,7 @@ mod tests {
 
             let mut buf = Vec::new();
             wire_header_write_variable_size_with_codec(
-                &mut buf, &original, 1, CompressionType::ZstdDict, MAX_SIZE, PROTOCOL_VERSION_V2, &codec,
+                &mut buf, &original, 1, CompressionType::ZstdDict, MAX_SIZE, PROTOCOL_VERSION_V4, &codec,
             ).await.expect("write_with_codec");
 
             let mut reader = Cursor::new(buf);
@@ -680,7 +680,7 @@ mod tests {
         block_on(async {
             let small_msg = vec![1u8, 2, 3];
             let mut buf = Vec::new();
-            wire_header_write_variable_size_uncompressed(&mut buf, &small_msg, 1, MAX_SIZE, PROTOCOL_VERSION_V2)
+            wire_header_write_variable_size_uncompressed(&mut buf, &small_msg, 1, MAX_SIZE, PROTOCOL_VERSION_V4)
                 .await.expect("write_uncompressed");
 
             let mut reader = Cursor::new(buf);
@@ -694,7 +694,7 @@ mod tests {
     fn message_over_fixed_boundary_uses_heap() {
         block_on(async {
             let large_msg = vec![0u8; WIRE_FIXED_BODY_SIZE + 100];
-            let result: Vec<u8> = roundtrip_variable_uncompressed(&large_msg, 1, PROTOCOL_VERSION_V2).await;
+            let result: Vec<u8> = roundtrip_variable_uncompressed(&large_msg, 1, PROTOCOL_VERSION_V4).await;
             assert_eq!(result, large_msg);
         });
     }
@@ -713,21 +713,21 @@ mod tests {
 
             let mut buf = Vec::new();
             let err = wire_header_write_variable_size_uncompressed(
-                &mut buf, &big_msg, 1, TINY_MAX, PROTOCOL_VERSION_V2,
+                &mut buf, &big_msg, 1, TINY_MAX, PROTOCOL_VERSION_V4,
             ).await.expect_err("uncompressed must reject");
             assert!(matches!(err, WireError::MessageTooLarge { .. }));
 
             let codec = test_codec();
             let mut buf = Vec::new();
             let err = wire_header_write_variable_size_with_codec(
-                &mut buf, &big_msg, 1, CompressionType::None, TINY_MAX, PROTOCOL_VERSION_V2, &codec,
+                &mut buf, &big_msg, 1, CompressionType::None, TINY_MAX, PROTOCOL_VERSION_V4, &codec,
             ).await.expect_err("with_codec(None) must reject");
             assert!(matches!(err, WireError::MessageTooLarge { .. }));
 
             let mut buf = Vec::new();
             let raw_body = vec![0u8; (TINY_MAX + 1) as usize];
             let err = wire_header_write_variable_size_raw(
-                &mut buf, &raw_body, 1, CompressionType::None, raw_body.len() as u32, TINY_MAX, PROTOCOL_VERSION_V2,
+                &mut buf, &raw_body, 1, CompressionType::None, raw_body.len() as u32, TINY_MAX, PROTOCOL_VERSION_V4,
             ).await.expect_err("raw must reject");
             assert!(matches!(err, WireError::MessageTooLarge { .. }));
         });
@@ -742,13 +742,13 @@ mod tests {
             let codec = test_codec();
             let mut buf = Vec::new();
             let err = wire_header_write_variable_size_with_codec(
-                &mut buf, &compressible, 1, CompressionType::ZstdDict, TINY_MAX, PROTOCOL_VERSION_V2, &codec,
+                &mut buf, &compressible, 1, CompressionType::ZstdDict, TINY_MAX, PROTOCOL_VERSION_V4, &codec,
             ).await.expect_err("with_codec(ZstdDict) must reject");
             assert!(matches!(err, WireError::MessageTooLarge { message_length, .. } if message_length > TINY_MAX));
 
             let mut buf = Vec::new();
             let err = wire_header_write_variable_size_raw(
-                &mut buf, &[0u8; 60], 1, CompressionType::ZstdDict, 1_048_584, TINY_MAX, PROTOCOL_VERSION_V2,
+                &mut buf, &[0u8; 60], 1, CompressionType::ZstdDict, 1_048_584, TINY_MAX, PROTOCOL_VERSION_V4,
             ).await.expect_err("raw must reject");
             assert!(matches!(err, WireError::MessageTooLarge { message_length, .. } if message_length > TINY_MAX));
         });
@@ -758,7 +758,7 @@ mod tests {
     fn write_fixed_size_rejects_oversized_body() {
         block_on(async {
             let big = vec![7u8; WIRE_FIXED_BODY_SIZE + 1];
-            for &version in &[PROTOCOL_VERSION_V2, PROTOCOL_VERSION_V3] {
+            for &version in &[PROTOCOL_VERSION_V4, PROTOCOL_VERSION_V5] {
                 let mut buf = Vec::new();
                 let err = wire_header_write_fixed_size(&mut buf, &big, 1, version)
                     .await
@@ -776,10 +776,10 @@ mod tests {
     #[test]
     fn header_parses_all_fields_correctly() {
         block_on(async {
-            let header_bytes = make_header(2, 0x12345678, 0xAABBCCDD, 0x11223344, 1);
+            let header_bytes = make_header(PROTOCOL_VERSION_V4, 0x12345678, 0xAABBCCDD, 0x11223344, 1);
             let mut reader = Cursor::new(header_bytes);
             let header = WireHeader::from_reader(&mut reader, u64::MAX).await.expect("from_reader");
-            assert_eq!(header.version, 2);
+            assert_eq!(header.version, PROTOCOL_VERSION_V4);
             assert_eq!(header.message_type, 0x12345678);
             assert_eq!(header.compressed_length, 0xAABBCCDD);
             assert_eq!(header.uncompressed_length, 0x11223344);
@@ -791,7 +791,7 @@ mod tests {
     fn header_rejects_unknown_compression_bytes() {
         block_on(async {
             for bad_byte in [2u8, 3, 4, 5, 255] {
-                let header_bytes = make_header(2, 1, 100, 100, bad_byte);
+                let header_bytes = make_header(PROTOCOL_VERSION_V4, 1, 100, 100, bad_byte);
                 let mut reader = Cursor::new(header_bytes);
                 let result = WireHeader::from_reader(&mut reader, MAX_SIZE).await;
                 assert!(result.is_err(), "byte {} should be rejected", bad_byte);
@@ -814,7 +814,7 @@ mod tests {
     #[test]
     fn incomplete_body_returns_io_error() {
         block_on(async {
-            let mut data = make_header(2, 1, 100, 100, 0);
+            let mut data = make_header(PROTOCOL_VERSION_V4, 1, 100, 100, 0);
             data.extend_from_slice(&[0u8; 50]);
             let mut reader = Cursor::new(data);
             let header = WireHeader::from_reader(&mut reader, MAX_SIZE).await.expect("from_reader");

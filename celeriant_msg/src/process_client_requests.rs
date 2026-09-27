@@ -268,13 +268,13 @@ mod tests {
         datablocks::datablock_aggregate_event::DatablockAggregateEvent,
         schema_key::SchemaKey,
     };
-    use celeriant_wire::network::wire_header::{PROTOCOL_VERSION_V2, PROTOCOL_VERSION_V3};
+    use celeriant_wire::network::wire_header::{PROTOCOL_VERSION_V4, PROTOCOL_VERSION_V5};
     use futures_lite::{future::block_on, io::Cursor};
     use std::collections::{HashMap, HashSet};
 
     const REQUEST_TYPE_COUNT: usize = 10;
     const MAX_ID: u32 = 10;
-    const VERSIONS: [u32; 2] = [PROTOCOL_VERSION_V2, PROTOCOL_VERSION_V3];
+    const VERSIONS: [u32; 2] = [PROTOCOL_VERSION_V4, PROTOCOL_VERSION_V5];
 
     fn all_types() -> [ClientRequestType; REQUEST_TYPE_COUNT] {
         [
@@ -515,7 +515,7 @@ mod tests {
         block_on(async {
             for rt in all_types() {
                 let req = make_request(rt);
-                let bytes = write_bytes(&req, PROTOCOL_VERSION_V2, CompressionType::None).await;
+                let bytes = write_bytes(&req, PROTOCOL_VERSION_V4, CompressionType::None).await;
                 let compression_byte = bytes[16];
                 if is_variable_size(rt) {
                     assert!(compression_byte == 0 || compression_byte > 0, "{:?} should use variable path", rt);
@@ -554,7 +554,7 @@ mod tests {
     fn size_limit_rejects_oversized() {
         block_on(async {
             let req = make_request(ClientRequestType::Write);
-            let bytes = write_bytes(&req, PROTOCOL_VERSION_V2, CompressionType::None).await;
+            let bytes = write_bytes(&req, PROTOCOL_VERSION_V4, CompressionType::None).await;
 
             let result = WireHeader::from_reader(&mut Cursor::new(bytes), 1).await;
             assert!(result.is_err(), "should reject when max_size < body size");
@@ -565,7 +565,7 @@ mod tests {
     fn truncated_stream_fails() {
         block_on(async {
             let req = make_request(ClientRequestType::AggregateDetails);
-            let bytes = write_bytes(&req, PROTOCOL_VERSION_V2, CompressionType::None).await;
+            let bytes = write_bytes(&req, PROTOCOL_VERSION_V4, CompressionType::None).await;
 
             let codec = test_codec();
             for truncate_at in [0, 10, bytes.len() - 1] {
@@ -587,7 +587,7 @@ mod tests {
     fn invalid_message_type_fails() {
         block_on(async {
             let req = make_request(ClientRequestType::AggregateDetails);
-            let mut bytes = write_bytes(&req, PROTOCOL_VERSION_V2, CompressionType::None).await;
+            let mut bytes = write_bytes(&req, PROTOCOL_VERSION_V4, CompressionType::None).await;
 
             bytes[4..8].copy_from_slice(&(MAX_ID + 1).to_le_bytes());
             let header = WireHeader::from_reader(&mut Cursor::new(bytes.clone()), u64::MAX).await.expect("header");
@@ -623,18 +623,18 @@ mod tests {
                 )]),
             });
 
-            // V2 uncompressed
-            let bytes = write_bytes(&req, PROTOCOL_VERSION_V2, CompressionType::None).await;
+            // V4 uncompressed
+            let bytes = write_bytes(&req, PROTOCOL_VERSION_V4, CompressionType::None).await;
             let parsed = read_back(&bytes).await;
             assert_eq!(parsed.correlation_id(), req.correlation_id());
 
-            // V2 uncompressed (large)
-            let bytes = write_bytes(&req, PROTOCOL_VERSION_V2, CompressionType::None).await;
+            // V4 uncompressed (large)
+            let bytes = write_bytes(&req, PROTOCOL_VERSION_V4, CompressionType::None).await;
             let parsed = read_back(&bytes).await;
             assert_eq!(parsed.correlation_id(), req.correlation_id());
 
-            // V3 uncompressed (large)
-            let bytes = write_bytes(&req, PROTOCOL_VERSION_V3, CompressionType::None).await;
+            // V5 uncompressed (large)
+            let bytes = write_bytes(&req, PROTOCOL_VERSION_V5, CompressionType::None).await;
             let parsed = read_back(&bytes).await;
             assert_eq!(parsed.correlation_id(), req.correlation_id());
         });

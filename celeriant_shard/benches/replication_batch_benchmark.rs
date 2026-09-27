@@ -556,7 +556,7 @@ fn run_follower_apply(captured: &CapturedBatches) -> Duration {
 /// compare against the `main_pre_follower_commit` baseline, band ±5%.
 fn bench_follower_apply(c: &mut Criterion) {
     let mut group = c.benchmark_group("replication_batch");
-    // 30 samples: n=10 left the 8agg CI wider than the ±5% band (phase-4 gate).
+    // 30 samples: n=10 left the 8agg CI wider than the ±5% band.
     group.sample_size(30);
     group.measurement_time(Duration::from_secs(10));
     group.warm_up_time(Duration::from_secs(3));

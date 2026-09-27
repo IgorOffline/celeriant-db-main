@@ -30,6 +30,10 @@ name = "fuzz_wire_header"
 path = "src/bin/fuzz_wire_header.rs"
 
 [[bin]]
+name = "fuzz_conflict_response"
+path = "src/bin/fuzz_conflict_response.rs"
+
+[[bin]]
 name = "fuzz_serialised_datablock"
 path = "src/bin/fuzz_serialised_datablock.rs"
 

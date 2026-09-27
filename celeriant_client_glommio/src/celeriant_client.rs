@@ -7,7 +7,7 @@ use celeriant_msg::process_cluster_responses::ClusterResponse;
 use celeriant_wal::compression_type::CompressionType;
 use celeriant_wire::codec::compression::DictCodec;
 use celeriant_wire::network::wire_error::WireError;
-use celeriant_wire::network::wire_header::PROTOCOL_VERSION_V2;
+use celeriant_wire::network::wire_header::PROTOCOL_VERSION_V4;
 use futures_lite::future::or;
 use glommio::net::TcpStream;
 use glommio::timer::Timer;
@@ -238,7 +238,7 @@ impl CeleriantClient {
             request,
             compression,
             self.max_request_size,
-            PROTOCOL_VERSION_V2,
+            PROTOCOL_VERSION_V4,
             &self.dict_codec,
         )
         .await
@@ -373,7 +373,7 @@ mod cluster_cancellation_tests {
                     while !server.gate.get() {
                         park_briefly().await;
                     }
-                    if ClusterResponse::write_response(&mut stream, &response, MAX, PROTOCOL_VERSION_V2).await.is_err() {
+                    if ClusterResponse::write_response(&mut stream, &response, MAX, PROTOCOL_VERSION_V4).await.is_err() {
                         break;
                     }
                     let _ = stream.flush().await;

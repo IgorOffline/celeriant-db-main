@@ -214,12 +214,8 @@ mod tests {
         assert_eq!(back.error_kinds[0].count, 1);
     }
 
-    /// Phase 7 built all four curve fields inside one struct literal. Every
-    /// guard in a `let` initialiser lives to the semicolon, so the delta row's
-    /// second `warm` lock met the first one still held and the thread wedged in
-    /// the futex forever — no panic, no progress, nothing written after it.
-    /// Bounded on a side thread on purpose: a test that hangs the suite is
-    /// worse than no test.
+    /// Guards in a struct literal live to the semicolon; acquiring `warm` twice
+    /// there deadlocks. A side thread bounds the test if that regression returns.
     #[test]
     fn snapshotting_the_curves_never_locks_a_curve_twice() {
         let curve = |ops| {

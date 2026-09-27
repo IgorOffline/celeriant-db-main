@@ -3,7 +3,7 @@
 //! Concurrent read/write testing with variable payload sizes.
 //! Creates a temporary data directory and spawns the server automatically.
 //!
-//! Run with: cargo run --bin chaos_main
+//! Run with: cargo run --release -p celeriant_integration_tests -- --test chaos
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 

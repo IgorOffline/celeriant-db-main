@@ -14,7 +14,7 @@
 //! The key invariant: a restarting node seeing a stale lease from another leader
 //! becomes follower and waits, rather than attempting takeover.
 //!
-//! Run with: cargo run --bin s3_stale_lease_main
+//! Run with: cargo run --release -p celeriant_integration_tests -- --test s3_stale_lease
 
 use celeriant_client_tokio::celeriant_client::CeleriantClient;
 use crate::{poll_converged_count, poll_event_count, write_event, MinioContainer, ServerConfig, TestServer, FOLLOWER_CONVERGENCE_TIMEOUT};

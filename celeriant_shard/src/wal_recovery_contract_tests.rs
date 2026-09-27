@@ -1,9 +1,7 @@
-//! Blind oracle: the WAL crash-window recovery contract that Phase 4 (C6) must
-//! not break.
+//! WAL recovery after a crash between block writes and the header write.
 //!
-//! Phase 4 changed `sync()` from three serial `write_at`s (datablocks,
-//! metablocks, dual header) to a joined datablocks+metablocks pair followed by
-//! the header, then `fdatasync`. The durability invariant is that the dual
+//! `sync()` joins datablock and metablock writes before writing the header and
+//! calling `fdatasync`. The durability invariant is that the dual
 //! header must never become durable before the blocks it points at: boot CRCs
 //! only the header block and the chain-tip rebuild scan is CRC-free, so a
 //! header over unlanded blocks is unrecoverable, undetectable corruption.
@@ -12,9 +10,7 @@
 //! for the joined one. What CI actually runs is narrower — the config literal
 //! in this file sets `wal_join_data_meta_writes` to the shipped default
 //! (`true`), so these tests exercise the joined position only. The serial
-//! position was verified by manually flipping that literal to `false` (both
-//! positions green, 533 tests); nothing here enforces it, so a future change to
-//! the serial path is not covered by this file unless the flip is repeated.
+//! position is not covered by this file unless that setting is changed.
 //!
 //! The contracted state a crash may legally leave behind:
 //!
@@ -346,7 +342,7 @@ async fn write_a_capture_header_then_write_b(dir: &Path, agg: &AggregateKey) -> 
 
 // ── Scenario 1: both header copies stale — data+meta landed, header did not ──
 
-/// The exact Phase 4 hazard state. B's datablocks and metablocks are on disk;
+/// The crash state between block writes and the header write. B's datablocks and metablocks are on disk;
 /// neither header copy points at them. Boot must land on A's cursor: A's events
 /// exactly, B invisible, no error, no invented tail — and the recovered cursor
 /// must be usable, with the next batch (physically overwriting B's orphaned

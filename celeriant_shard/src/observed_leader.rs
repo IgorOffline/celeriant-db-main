@@ -53,10 +53,9 @@ impl ObservedLeaderTarget {
     }
 }
 
-/// Blind-authored contract tests, written from the doc comments alone, not the
-/// implementation. The struct exists to stop the phantom-target wedge: a tip
-/// taught by a dead leader epoch may be culled cluster-wide, and catchup
-/// chasing it would wait on AwaitMore forever.
+/// The struct exists to stop the phantom-target wedge: a tip taught by a dead
+/// leader epoch may be culled cluster-wide, and catchup chasing it would wait
+/// on AwaitMore forever.
 #[cfg(test)]
 mod tests {
     use super::ObservedLeaderTarget;

@@ -22,7 +22,7 @@
 //!   6. Verify S3 fallback objects exist and leader has sidecars for every sealed
 //!      segment (TCP-phase + S3-phase combined).
 //!
-//! Run with: cargo run --bin s3_degraded_segment_summaries_main
+//! Run with: cargo run --release -p celeriant_integration_tests -- --test s3_degraded_segment_summaries
 
 use celeriant_client_tokio::celeriant_client::CeleriantClient;
 use crate::{

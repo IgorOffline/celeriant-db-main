@@ -1,22 +1,12 @@
 //! Shared test utilities for celeriant_integration_tests integration tests.
 
 pub mod registry;
+pub mod occ_guards;
 
-// Contract suite (docs-as-oracle), ported from the standalone blind-test harness.
-// Each phaseN module holds several `pub async fn` tests, registered by name in
-// `registry::all_tests()` and dispatched in `main::dispatch_test`.
 pub mod common;
-pub mod phase1;
-pub mod phase2;
-pub mod phase3;
-pub mod phase4;
-pub mod phase5;
-pub mod phase6;
-pub mod phase7;
-pub mod phase8;
-pub mod phase9;
-pub mod phase10;
-pub mod phase11;
+pub mod read_pagination;
+pub mod per_aggregate_order_across_shards;
+pub mod s3_outage_leader_keeps_serving;
 pub mod invariant_list_termination;
 pub mod invariant_metrics_described;
 pub mod invariant_pool_seed_only_routing;
@@ -89,14 +79,14 @@ pub mod metamorphic_post_failover_parity;
 pub mod metamorphic_standalone_vs_cluster;
 pub mod mtls_test;
 pub mod multi_shard_watch_test;
-pub mod p1_1_dcb_rollback;
-pub mod p1_2_concurrent_dcb;
-pub mod p1_3_cross_shard_rejection;
-pub mod p1_4_exactly_once;
-pub mod p1_6_ordering_verification;
-pub mod p1_7_multitenancy_isolation;
-pub mod p2_1_write_survival;
-pub mod p2_5_blackout_acked_writes_survive;
+pub mod dcb_rollback;
+pub mod concurrent_dcb;
+pub mod cross_shard_rejection;
+pub mod exactly_once;
+pub mod ordering_verification;
+pub mod multitenancy_isolation;
+pub mod write_survival;
+pub mod blackout_acked_writes_survive;
 pub mod idempotency_cold_reconstruction;
 pub mod idempotency_negative_scan_load;
 pub mod idempotency_negative_scan_present_client;
@@ -104,14 +94,14 @@ pub mod idempotency_restart_fanin;
 pub mod idempotency_trim_client_state;
 pub mod idempotency_delete_recreate;
 pub mod idempotency_across_seal;
-pub mod p2_2_dual_restart;
-pub mod p2_3_wal_corruption;
-pub mod p2_4_s3_capacity;
-pub mod p3_1_cold_read_latency;
-pub mod p3_2_bloom_filter;
-pub mod p3_3_sequential_cold_reads;
-pub mod p3_4_read_thundering_herd;
-pub mod p4_1_rolling_upgrade;
+pub mod dual_restart;
+pub mod wal_corruption;
+pub mod s3_capacity;
+pub mod cold_read_latency;
+pub mod bloom_filter;
+pub mod sequential_cold_reads;
+pub mod read_thundering_herd;
+pub mod rolling_upgrade;
 pub mod pool_test;
 pub mod read_list_benchmark;
 pub mod recovery_multiseg_read_amplification;
@@ -1840,13 +1830,11 @@ pub async fn wait_for_leader(address: &str, timeout: Duration) -> Result<(), Box
 
 /// Scale a test's concurrency by `CELERIANT_TEST_LOAD_SCALE`.
 ///
-/// Session 3, Phase 3. The `chaos`, `chaos_delete` and `chaos_watch` categories carry fixed
-/// concurrency constants — 10 writer/reader pairs, 6 writers, and so on. The question being
-/// asked of them is whether **data-integrity invariants degrade under load**, which cannot be
-/// answered at one fixed concurrency.
+/// Vary concurrency in the chaos categories to exercise data-integrity invariants
+/// under different loads.
 ///
 /// Unset, or set to anything unparseable or zero, returns `base` unchanged, so every existing
-/// invocation is byte-identical to before this existed.
+/// invocation keeps its configured concurrency.
 pub fn load_scale(base: usize) -> usize {
     std::env::var("CELERIANT_TEST_LOAD_SCALE")
         .ok()

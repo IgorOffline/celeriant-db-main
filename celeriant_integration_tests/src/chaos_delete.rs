@@ -3,7 +3,7 @@
 //! Concurrent write/delete/read testing with verification.
 //! Creates a temporary data directory and spawns the server automatically.
 //!
-//! Run with: cargo run --bin chaos_delete_main
+//! Run with: cargo run --release -p celeriant_integration_tests -- --test chaos_delete
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 

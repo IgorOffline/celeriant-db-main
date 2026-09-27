@@ -17,7 +17,7 @@
 //! 5. Start B (join order varies by scenario)
 //! 6. Verify both nodes have all events, new writes replicate
 //!
-//! Run with: cargo run --release --bin standalone_to_distributed_main
+//! Run with: cargo run --release -p celeriant_integration_tests -- --test standalone_to_distributed
 
 use celeriant_client_tokio::celeriant_client::CeleriantClient;
 use crate::{

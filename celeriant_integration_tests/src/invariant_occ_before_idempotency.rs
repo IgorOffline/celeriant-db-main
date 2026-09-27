@@ -113,7 +113,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let result = write_occ(&mut client, &key, 1, Some(1), true).await;
     match &result {
         Err(ClientError::Server(ServerError::Write {
-            kind: WriteError::OptimisticConcurrencyViolation { expected_version, current_aggregate_version },
+            kind: WriteError::OptimisticConcurrencyViolation { expected_version, current_aggregate_version, .. },
             ..
         })) => {
             println!("  Got OCC violation (expected={:?}, current={:?})", expected_version, current_aggregate_version);

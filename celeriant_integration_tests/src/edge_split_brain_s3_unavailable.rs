@@ -21,7 +21,7 @@
 //!
 //! This is test #1 in the integration test coverage report.
 //!
-//! Run with: cargo run --bin edge_split_brain_s3_unavailable_main
+//! Run with: cargo run --release -p celeriant_integration_tests -- --test edge_split_brain_s3_unavailable
 
 use celeriant_client_tokio::celeriant_client::CeleriantClient;
 use crate::{

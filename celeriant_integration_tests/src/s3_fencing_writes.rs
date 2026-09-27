@@ -129,30 +129,29 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Err("Node B accepted writes on some shards but should be follower!".into());
     }
 
-    // Verify NotLeader error type with leader address (absorbed from not_leader_error)
     let not_leader_key = AggregateKey::new(9, 1, 1);
-    let not_leader_result = write_event(&mut node_b_client, &not_leader_key, 1, true).await;
-    match not_leader_result {
-        Err(ref e) => {
-            if let Some(client_err) = e.downcast_ref::<ClientError>() {
-                match client_err {
-                    ClientError::NotLeader { leader_address: Some(addr), .. } => {
-                        assert!(
-                            addr.ends_with(&format!(":{}", leader_port)),
-                            "NotLeader leader_address '{}' should contain leader port {}",
-                            addr, leader_port
-                        );
-                        println!("  ✓ NotLeader error includes correct leader address");
-                    }
-                    ClientError::NotLeader { leader_address: None, .. } => {
-                        println!("  ✓ NotLeader returned (leader address not yet known)");
-                    }
-                    _ => println!("  ✓ Follower rejected write (non-NotLeader error type)"),
-                }
-            }
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    let leader_hint = loop {
+        let last = match write_event(&mut node_b_client, &not_leader_key, 1, true).await {
+            Ok(()) => return Err("Follower accepted write but should return NotLeader".into()),
+            Err(e) => match e.downcast_ref::<ClientError>() {
+                Some(ClientError::NotLeader { leader_address: Some(addr), .. }) => break addr.clone(),
+                _ => format!("{e:?}"),
+            },
+        };
+        if std::time::Instant::now() >= deadline {
+            return Err(format!("Follower never returned NotLeader with a leader address, last: {last}").into());
         }
-        Ok(_) => return Err("Follower accepted write but should return NotLeader".into()),
-    }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+    assert!(
+        leader_hint.ends_with(&format!(":{}", leader_port)),
+        "NotLeader leader_address '{}' should contain leader port {}",
+        leader_hint, leader_port
+    );
+    let mut hinted_client = CeleriantClient::connect(&leader_hint).await?;
+    write_event(&mut hinted_client, &not_leader_key, 1, true).await?;
+    println!("  ✓ NotLeader carries leader address {} and it accepts the write", leader_hint);
 
     // ========================================
     // PHASE 3: Read initial lease state

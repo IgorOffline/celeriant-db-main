@@ -1,23 +1,8 @@
-//! client_seq deduplication state is not carried across
-//! a leader handover. A write whose ack was lost is retried with the same
-//! (client_id, client_seq); the old leader rejects it, but the node that
-//! promotes accepts it as new even though the original is already durably
-//! committed in its own WAL — same (client_id, client_seq) committed twice,
-//! final aggregate_version = acks + 1. Confirmed on disk by three chaos
-//! reproductions (session-v4/progress.md).
+//! Promotion must retain committed client-sequence deduplication state.
+//! Once (client C, sequence N) is committed for aggregate A, a leader write
+//! with the same client and sequence <= N must not append another version.
 //!
-//! Contract under test, stated behaviorally so it holds whichever cache path a
-//! fix chooses: once data containing (client C, client_seq N) for aggregate A
-//! is durable and committed on this node — however it arrived — a leader-path
-//! write for (C, seq <= N) on A must be rejected, never committed as a new
-//! version.
-//!
-//! `arrives_via_*` tests are expected RED; `arrives_via_boot_warmup_*` pins the
-//! one path that already works, so a fix cannot regress it.
-//!
-//! Scaffolding follows follower_commit_contract_tests.rs: real wire batches
-//! authored by a real leader shard, replayed into the node under test either as
-//! S3 fallback files or as live TCP replication carriers.
+//! Tests replay real leader batches through S3, live TCP and boot recovery.
 
 use std::cell::RefCell;
 use std::collections::HashMap;

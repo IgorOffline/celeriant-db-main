@@ -31,7 +31,7 @@ use celeriant_wire::disk::serialised_datablock::{CompressionPolicy, SerialisedDa
 use celeriant_wire::disk::versioned_block::{serialize_versioned_message, HEADER_SIZE};
 use celeriant_wire::network::wire_header::{
     wire_header_write_fixed_size, wire_header_write_variable_size_uncompressed,
-    wire_header_write_variable_size_with_codec, PROTOCOL_VERSION_V2,
+    wire_header_write_variable_size_with_codec, PROTOCOL_VERSION_V4,
 };
 use celeriant_wal::compression_type::CompressionType;
 use celeriant_wal::metablocks::datablock_storage_kind::DatablockStorageKind;
@@ -138,7 +138,7 @@ fn gen_wire_header(root: &Path) {
     futures_lite::future::block_on(async {
         // Fixed-size frame.
         let mut buf = Vec::new();
-        wire_header_write_fixed_size(&mut buf, &12345u64, 1, PROTOCOL_VERSION_V2)
+        wire_header_write_fixed_size(&mut buf, &12345u64, 1, PROTOCOL_VERSION_V4)
             .await
             .unwrap();
         write_seed(&dir, "fixed.bin", &buf);
@@ -146,7 +146,7 @@ fn gen_wire_header(root: &Path) {
         // Variable uncompressed frame, big enough to skip the small-payload fast path.
         let mut buf = Vec::new();
         let payload = vec![7u8; 2000];
-        wire_header_write_variable_size_uncompressed(&mut buf, &payload, 1, 1 << 20, PROTOCOL_VERSION_V2)
+        wire_header_write_variable_size_uncompressed(&mut buf, &payload, 1, 1 << 20, PROTOCOL_VERSION_V4)
             .await
             .unwrap();
         write_seed(&dir, "variable_uncompressed.bin", &buf);
@@ -160,7 +160,7 @@ fn gen_wire_header(root: &Path) {
             1,
             CompressionType::ZstdDict,
             1 << 20,
-            PROTOCOL_VERSION_V2,
+            PROTOCOL_VERSION_V4,
             &codec,
         )
         .await
@@ -170,7 +170,7 @@ fn gen_wire_header(root: &Path) {
         // Small payload, no compression - exercises the stack fast path.
         let mut buf = Vec::new();
         let payload = vec![1u8, 2, 3];
-        wire_header_write_variable_size_uncompressed(&mut buf, &payload, 1, 1 << 20, PROTOCOL_VERSION_V2)
+        wire_header_write_variable_size_uncompressed(&mut buf, &payload, 1, 1 << 20, PROTOCOL_VERSION_V4)
             .await
             .unwrap();
         write_seed(&dir, "small_uncompressed.bin", &buf);

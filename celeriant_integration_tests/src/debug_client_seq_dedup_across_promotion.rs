@@ -1,30 +1,10 @@
-//! client_seq deduplication state is not carried across a leader handover.
+//! A promoted follower must reject an idempotent retry whose original batch is committed.
 //!
-//! Field shape, confirmed on disk by three chaos reproductions of
-//! `idempotency_audit_partition_then_kill_minio`: a client write whose ack is
-//! lost is retried with the same (client_id, client_seq). The old leader
-//! correctly rejects the retry (`InflightDuplicateWrite`). When the other node
-//! promotes it accepts the same retry as a NEW write — even though the original
-//! is already durably committed in its own WAL — and assigns a fresh
-//! aggregate_version. Fingerprint: final version == acks + 1, byte-identical on
-//! both nodes, the duplicate landing at the next lease epoch.
+//! Restart the follower after client sequences 1..=3 to populate its dedup cache,
+//! replicate sequences 4..=5, then kill the leader and retry sequence 5 after promotion.
+//! The aggregate must remain at version 5; replication must refresh the cached sequence.
 //!
-//! Deterministic reproduction here, no chaos rig:
-//!   1. Client C writes idempotent seqs 1..=3 to the leader; both nodes converge.
-//!   2. The follower RESTARTS — boot warmup seeds its dedup cache from its local
-//!      WAL, so it now holds a live entry for (C, seq 3). This is the field's
-//!      restarted-node precondition, and the reason the write path's cache-miss
-//!      disk scan (which reads the truth) never runs on the retry.
-//!   3. Client C writes idempotent seqs 4..=5; the follower applies them via
-//!      replication, which does NOT refresh that dedup entry — it is now stale
-//!      at 3 while the WAL holds 5.
-//!   4. The leader is killed; the follower promotes.
-//!   5. Client C retries seq 5 (the write whose ack it never saw).
-//!
-//! CONTRACT: the retry must be rejected as a duplicate and the aggregate must
-//! stay at version 5. EXPECTED RED today: accepted, version 6.
-//!
-//! Opt-in only (`debug` category) — see registry.rs.
+//! Opt-in `debug` category; see registry.rs.
 
 use celeriant_client_tokio::celeriant_client::CeleriantClient;
 use celeriant_client_tokio::client_error::ClientError;

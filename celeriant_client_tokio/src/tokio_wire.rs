@@ -35,7 +35,7 @@ where
 }
 
 /// Like `read_from_header`, but fires `on_body_consumed` once the whole frame
-/// has been read off the socket (clean stream)
+/// has been read and decoded successfully (reusable stream)
 pub(crate) async fn read_from_header_with<R>(
     header: WireHeader,
     reader: &mut R,
@@ -45,22 +45,24 @@ pub(crate) async fn read_from_header_with<R>(
 where
     R: AsyncReadExt + Unpin,
 {
+    if header.version != celeriant_wire::network::wire_header::PROTOCOL_VERSION_V4 {
+        return Err(ReadWireDataError::ReadHeaderFailure(WireError::MalformedFrame("response changed the pinned client protocol version".into())));
+    }
     if ClientResponse::is_fixed_size_variant(header.message_type) {
         // Fixed-size frames are never compressed regardless of `dict_bytes`.
         let raw = header
             .read_fixed_body_raw(reader)
             .await
             .map_err(ReadWireDataError::ReadBodyFailure)?;
+        let response = ClientResponse::deserialize_body(header.message_type, &raw, header.version)?;
         on_body_consumed();
-        return ClientResponse::deserialize_body(header.message_type, &raw, header.version);
+        return Ok(response);
     }
 
     let raw = header
         .read_variable_body_raw(reader)
         .await
         .map_err(ReadWireDataError::ReadBodyFailure)?;
-    on_body_consumed();
-
     let body = match header.compression_type {
         CompressionType::None => raw,
         CompressionType::ZstdDict => {
@@ -74,7 +76,9 @@ where
         }
     };
 
-    ClientResponse::deserialize_body(header.message_type, &body, header.version)
+    let response = ClientResponse::deserialize_body(header.message_type, &body, header.version)?;
+    on_body_consumed();
+    Ok(response)
 }
 
 #[cfg(test)]
@@ -85,7 +89,7 @@ mod tests {
     use celeriant_msg::response::watch_event::WatchResponseEvent;
     use celeriant_wal::builtin_dict::BUILTIN_DICT_BYTES;
     use celeriant_wire::codec::compression::DictCodec;
-    use celeriant_wire::network::wire_header::PROTOCOL_VERSION_V2;
+    use celeriant_wire::network::wire_header::PROTOCOL_VERSION_V4;
     use futures_lite::future::block_on;
     use futures_lite::io::Cursor;
 
@@ -127,7 +131,7 @@ mod tests {
 
     fn malformed_frame(message_type: ClientResponseType) -> (WireHeader, Vec<u8>) {
         let header = WireHeader {
-            version: PROTOCOL_VERSION_V2,
+            version: PROTOCOL_VERSION_V4,
             message_type: message_type as u32,
             compressed_length: 1,
             uncompressed_length: 1,
@@ -136,10 +140,9 @@ mod tests {
         (header, vec![2u8])
     }
 
-    /// Contract: `on_body_consumed` fires when a fixed-size frame's body is read, even
-    /// when the deserialisation then fails.
+    /// Malformed frames never mark their connection reusable.
     #[test]
-    fn on_body_consumed_fires_on_failed_fixed_size_deserialisation() {
+    fn malformed_fixed_size_responses_do_not_mark_the_stream_reusable() {
         block_on(async {
             let (header, body) = malformed_frame(ClientResponseType::AggregateDetails);
             let mut reader = Cursor::new(body);
@@ -148,8 +151,8 @@ mod tests {
                 read_from_header_with(header, &mut reader, None, || fired = true).await;
             assert!(result.is_err(), "fixed-size body must fail to deserialise");
             assert!(
-                fired,
-                "contract: on_body_consumed must fire on failed fixed-size deserialisation"
+                !fired,
+                "malformed response must not mark its stream reusable"
             );
         });
     }
@@ -162,7 +165,7 @@ mod tests {
             let response = aggregate_details_response();
             let codec = test_codec();
             let mut buf = Vec::new();
-            ClientResponse::write_response(&mut buf, &response, true, &codec, MAX_SIZE, PROTOCOL_VERSION_V2)
+            ClientResponse::write_response(&mut buf, &response, true, &codec, MAX_SIZE, PROTOCOL_VERSION_V4)
                 .await.expect("write_response");
 
             // Reading with dict_bytes=None must still succeed — fixed-size never compresses.
@@ -181,7 +184,7 @@ mod tests {
             let response = watch_response_with_events(500);
             let codec = test_codec();
             let mut buf = Vec::new();
-            ClientResponse::write_response(&mut buf, &response, true, &codec, MAX_SIZE, PROTOCOL_VERSION_V2)
+            ClientResponse::write_response(&mut buf, &response, true, &codec, MAX_SIZE, PROTOCOL_VERSION_V4)
                 .await.expect("write_response");
 
             // Sanity: server picked ZstdDict for this payload.
@@ -204,7 +207,7 @@ mod tests {
             let response = watch_response_with_events(500);
             let codec = test_codec();
             let mut buf = Vec::new();
-            ClientResponse::write_response(&mut buf, &response, false, &codec, MAX_SIZE, PROTOCOL_VERSION_V2)
+            ClientResponse::write_response(&mut buf, &response, false, &codec, MAX_SIZE, PROTOCOL_VERSION_V4)
                 .await.expect("write_response");
             assert_eq!(buf[16], CompressionType::None.to_byte());
 
@@ -226,7 +229,7 @@ mod tests {
             let response = watch_response_with_events(500);
             let codec = test_codec();
             let mut buf = Vec::new();
-            ClientResponse::write_response(&mut buf, &response, true, &codec, MAX_SIZE, PROTOCOL_VERSION_V2)
+            ClientResponse::write_response(&mut buf, &response, true, &codec, MAX_SIZE, PROTOCOL_VERSION_V4)
                 .await.expect("write_response");
             assert_eq!(buf[16], CompressionType::ZstdDict.to_byte());
 

@@ -110,11 +110,11 @@ impl ClusterRequest {
 mod tests {
     use super::*;
     use crate::request::requests::ReplicationBatchRequest;
-    use celeriant_wire::network::wire_header::{PROTOCOL_VERSION_V2, PROTOCOL_VERSION_V3, WIRE_HEADER_SIZE};
+    use celeriant_wire::network::wire_header::{PROTOCOL_VERSION_V4, PROTOCOL_VERSION_V5, WIRE_HEADER_SIZE};
     use futures_lite::{future::block_on, io::Cursor};
 
     const REQUEST_TYPE_COUNT: usize = 3;
-    const VERSIONS: [u32; 2] = [PROTOCOL_VERSION_V2, PROTOCOL_VERSION_V3];
+    const VERSIONS: [u32; 2] = [PROTOCOL_VERSION_V4, PROTOCOL_VERSION_V5];
 
     fn all_types() -> [ClusterRequestType; REQUEST_TYPE_COUNT] {
         [
@@ -225,7 +225,7 @@ mod tests {
         block_on(async {
             for rt in all_types() {
                 let req = make_request(rt);
-                let bytes = write_bytes(&req, PROTOCOL_VERSION_V2, CompressionType::None).await;
+                let bytes = write_bytes(&req, PROTOCOL_VERSION_V4, CompressionType::None).await;
                 let compression_byte = bytes[16];
                 if is_variable_size(rt) {
                     assert!(compression_byte == 0 || compression_byte > 0, "{:?} should use variable path", rt);
@@ -264,7 +264,7 @@ mod tests {
     fn truncated_stream_fails() {
         block_on(async {
             let req = make_request(ClusterRequestType::Heartbeat);
-            let bytes = write_bytes(&req, PROTOCOL_VERSION_V2, CompressionType::None).await;
+            let bytes = write_bytes(&req, PROTOCOL_VERSION_V4, CompressionType::None).await;
 
             let codec = test_codec();
             for truncate_at in [0, 10, bytes.len() - 1] {
@@ -288,13 +288,13 @@ mod tests {
             let req = make_request(ClusterRequestType::ReplicationBatch);
             let codec = test_codec();
 
-            let bytes = write_bytes_with_dict(&req, PROTOCOL_VERSION_V2, CompressionType::ZstdDict, &codec).await;
+            let bytes = write_bytes_with_dict(&req, PROTOCOL_VERSION_V4, CompressionType::ZstdDict, &codec).await;
             assert_eq!(bytes[16], 1, "expected ZstdDict compression byte");
             let parsed = read_back_with_dict(&bytes, &codec).await;
             assert_eq!(parsed.request_type(), ClusterRequestType::ReplicationBatch);
             assert_eq!(parsed.correlation_id(), req.correlation_id());
 
-            let bytes_none = write_bytes(&req, PROTOCOL_VERSION_V2, CompressionType::None).await;
+            let bytes_none = write_bytes(&req, PROTOCOL_VERSION_V4, CompressionType::None).await;
             assert_eq!(bytes_none[16], 0, "expected None compression byte");
             let parsed_none = read_back(&bytes_none).await;
             assert_eq!(parsed_none.correlation_id(), req.correlation_id());
@@ -305,7 +305,7 @@ mod tests {
     fn invalid_message_type_fails() {
         block_on(async {
             let req = make_request(ClusterRequestType::Heartbeat);
-            let mut bytes = write_bytes(&req, PROTOCOL_VERSION_V2, CompressionType::None).await;
+            let mut bytes = write_bytes(&req, PROTOCOL_VERSION_V4, CompressionType::None).await;
 
             bytes[4..8].copy_from_slice(&99u32.to_le_bytes());
             let header = WireHeader::from_reader(&mut Cursor::new(bytes.clone()), u64::MAX).await.expect("header");

@@ -12,7 +12,7 @@
 
 # --- Campaign knobs -------------------------------------------------------
 #
-# Every one of these is a measurement axis in session/goal.md.
+# Each knob is an independent measurement axis.
 #
 # An unset knob emits NO line in the node env file, so the server's own default applies. The
 # harness deliberately does not restate defaults: a restated default drifts silently when the

@@ -16,7 +16,7 @@
 //!
 //! This is test #9 in the integration test coverage report.
 //!
-//! Run with: cargo run --bin edge_stale_cache_rotation_main
+//! Run with: cargo run --release -p celeriant_integration_tests -- --test edge_stale_cache_rotation
 
 use celeriant_client_tokio::celeriant_client::CeleriantClient;
 use crate::{

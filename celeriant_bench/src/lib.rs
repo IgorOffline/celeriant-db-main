@@ -27,6 +27,7 @@ pub mod cas_storm;
 pub mod delete_trim;
 pub mod error_breakdown;
 pub mod history;
+pub mod guard_fence;
 pub mod population;
 pub mod read_workload;
 pub mod watch_flood;
@@ -373,12 +374,8 @@ async fn run_write_loop(
         let breakdown = Arc::clone(&breakdown);
 
         tasks.push(tokio::spawn(async move {
-            // The pool dials lazily, so a task's FIRST successful request carries a TCP connect
-            // (and possibly a mesh redirect) inside its latency sample. F-35 flagged this as
-            // biasing p99 upward and contaminating proportionally more at high connection counts
-            // -- the same direction as the effect session 5 is decomposing. Held out of the
-            // reported percentiles and reported separately rather than silently discarded, so
-            // the size of the cut stays visible. Cut dated 2026-08-06 (session 5, phase 1a).
+            // The first success includes lazy connection setup and possibly a mesh redirect.
+            // Report it separately so steady-state percentiles exclude connection startup.
             let mut warmup: Option<u64> = None;
             let mut latencies = Vec::new();
             barrier.wait().await;
@@ -454,9 +451,8 @@ async fn run_write_loop(
                     // available, and no error count, since the write is about to succeed.
                     // With one writer per aggregate this should never fire; if it does, the
                     // aggregate ranges of the two client machines are overlapping.
-                    // `current_aggregate_version` is parsed out of the error message and so
-                    // is optional; with no value to resync to there is nothing better to do
-                    // than fall through to the normal error path.
+                    // The scalar field mirrors the first typed conflict. An incomplete
+                    // application-constructed error falls through to the normal error path.
                     Err(ClientError::Server(ServerError::Write {
                         kind: WriteError::OptimisticConcurrencyViolation {
                             current_aggregate_version: Some(current),

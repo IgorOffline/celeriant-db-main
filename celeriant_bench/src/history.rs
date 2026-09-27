@@ -351,6 +351,8 @@ pub fn classify_error(e: &ClientError) -> (OpOutcome, Option<String>) {
         ClientError::Server(ServerError::Write { kind, .. }) => {
             let outcome = match kind {
                 WriteError::EmptyEventsList
+                | WriteError::MalformedGuardEntry
+                | WriteError::ConflictResponseCapacityExceeded
                 | WriteError::ZeroEventType
                 | WriteError::ClientIdempotencyViolation { .. }
                 | WriteError::OptimisticConcurrencyViolation { .. }
@@ -403,6 +405,8 @@ pub fn classify_error(e: &ClientError) -> (OpOutcome, Option<String>) {
 fn write_error_label(kind: &WriteError) -> String {
     match kind {
         WriteError::EmptyEventsList => "EmptyEventsList",
+        WriteError::MalformedGuardEntry => "MalformedGuardEntry",
+        WriteError::ConflictResponseCapacityExceeded => "ConflictResponseCapacityExceeded",
         WriteError::ZeroEventType => "ZeroEventType",
         WriteError::ClientIdempotencyViolation { .. } => "ClientIdempotencyViolation",
         WriteError::OptimisticConcurrencyViolation { .. } => "OccConflict",

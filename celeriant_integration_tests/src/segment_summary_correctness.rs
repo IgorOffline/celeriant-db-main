@@ -3,7 +3,7 @@
 //! Verifies that segment summaries remain correct across log segment rotations,
 //! including multi-org/type listing, cross-segment deletes, trims, and recreates.
 //!
-//! Run with: cargo run --bin segment_summary_correctness_main
+//! Run with: cargo run --release -p celeriant_integration_tests -- --test segment_summary_correctness
 
 use std::collections::HashMap;
 

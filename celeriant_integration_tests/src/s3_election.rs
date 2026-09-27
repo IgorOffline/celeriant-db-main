@@ -11,7 +11,7 @@
 //! 6. Verify lease.json and membership.json in S3
 //! 7. Verify NO S3 fallback data (follower is active, TCP replication only)
 //!
-//! Run with: cargo run --bin s3_election_main
+//! Run with: cargo run --release -p celeriant_integration_tests -- --test s3_election
 
 use celeriant_client_tokio::celeriant_client::CeleriantClient;
 use crate::{count_events, is_leader, poll_converged_count, s3_cluster_config, write_event, MinioContainer, TestServer, FOLLOWER_CONVERGENCE_TIMEOUT};

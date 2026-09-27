@@ -229,7 +229,7 @@ pub fn handle_new_connection<R: ReplicationClient + 'static, D: S3Downloader + '
                         if write_identify_response(&mut tcp_stream, &res, version).await.is_err() {
                             return;
                         }
-                        match read_client_request(&mut tcp_stream, &ctx).await {
+                        match read_client_request(&mut tcp_stream, &ctx, version).await {
                             Some(r) => r,
                             None => return,
                         }
@@ -450,7 +450,7 @@ async fn handle_client_pipelining<R: ReplicationClient + 'static, D: S3Downloade
             break;
         }
 
-        match read_client_request(&mut tcp_stream, &ctx).await {
+        match read_client_request(&mut tcp_stream, &ctx, message_version).await {
             Some((next_request, next_version)) => {
                 // don't allow protocol version switching on the same connection.
                 if next_version != message_version {
@@ -1023,28 +1023,23 @@ async fn read_first_message<R: ReplicationClient + 'static, D: S3Downloader + 's
     tcp_stream: &mut TcpStream,
     ctx: &ConnectionContext<R, D, S>,
 ) -> Option<FirstMessage> {
-    read_with_timeout(ctx.config.slow_client_timeout, ctx.current_shard_id, "first message", async {
-        let header = WireHeader::from_reader(tcp_stream, ctx.config.max_request_size).await
-            .map_err(ReadWireDataError::ReadHeaderFailure)?;
-        let version = header.version;
-        if header.message_type == IDENTIFY_REQUEST_TYPE_ID {
-            let req = read_identify_request(header, tcp_stream).await?;
-            Ok(FirstMessage::Identify(req, version))
-        } else {
-            let req = ClientRequest::read_from_header(header, tcp_stream, &ctx.dict_codec).await?;
-            Ok(FirstMessage::ClientRequest(req, version))
-        }
-    }).await
+    read_first_message_from(tcp_stream, ctx).await
 }
 
 async fn read_client_request<R: ReplicationClient + 'static, D: S3Downloader + 'static, S: LeaseStore + 'static>(
     tcp_stream: &mut TcpStream,
     ctx: &ConnectionContext<R, D, S>,
+    pinned_version: u32,
 ) -> Option<(ClientRequest, u32)> {
     read_with_timeout(ctx.config.slow_client_timeout, ctx.current_shard_id, "client request", async {
         let header = WireHeader::from_reader(tcp_stream, ctx.config.max_request_size).await
             .map_err(ReadWireDataError::ReadHeaderFailure)?;
         let version = header.version;
+        if version != pinned_version {
+            return Err(ReadWireDataError::ReadHeaderFailure(WireError::MalformedFrame(
+                format!("connection protocol changed from {pinned_version} to {version}"),
+            )));
+        }
         let req = ClientRequest::read_from_header(header, tcp_stream, &ctx.dict_codec).await?;
         Ok((req, version))
     }).await
@@ -2244,6 +2239,28 @@ mod tests {
     }
 
     #[test]
+    fn routing_delete_multiple_aggregates_different_shards() {
+        let config = test_config(4, crate::RoutingRule::AggregateId);
+        let delete = SingleAggregateDelete {
+            allow_recreate: false,
+            allow_sequence_continuation: false,
+            expected_version: None,
+        };
+        let deletes = HashMap::from([
+            (AggregateKey::new(1, 2, 4), delete.clone()),
+            (AggregateKey::new(1, 2, 5), delete),
+        ]);
+        let request = ClientRequest::Delete(DeleteRequest {
+            correlation_id: None,
+            client_id: 1,
+            user_id: None,
+            deletes,
+        });
+        let result = determine_client_shard(&request, &config);
+        assert!(matches!(result, Err(ShardRoutingError::MultipleShardRoutes { .. })));
+    }
+
+    #[test]
     fn routing_write_empty_writes() {
         let config = test_config(4, crate::RoutingRule::AggregateId);
         let request = ClientRequest::Write(WriteRequest {
@@ -2463,6 +2480,49 @@ mod tests {
         assert!(matches!(result, Err(ShardRoutingError::IncompatibleFilters { .. })));
     }
 
+    #[test]
+    fn watch_session_rejects_latency_above_max() {
+        glommio::LocalExecutorBuilder::default()
+            .spawn(|| async {
+                use crate::sharded::lease_singleflight_contract_tests::{internal_config, scratch_dir};
+                use celeriant_shard::{replication_client::StubReplicationClient, s3_downloader::StubS3Downloader};
+                let dir = scratch_dir("watch-latency-guard");
+                let shard_wal = Rc::new(
+                    ShardWal::open(internal_config(&dir), ValidatedNodeStatus::create_standalone(), StubReplicationClient, StubS3Downloader)
+                        .await
+                        .unwrap(),
+                );
+                let max = Duration::from_millis(2000);
+                let watch = |latency_ms| WatchRequest {
+                    correlation_id: None,
+                    requested_latency_ms: Some(latency_ms),
+                    shard_id: None,
+                    orgs: None,
+                    aggregate_types: None,
+                    aggregates: Some([1u128].into()),
+                    operation_types: None,
+                };
+
+                let rejected = create_watch_session(&shard_wal, watch(2001), max, 10);
+                assert!(matches!(
+                    rejected,
+                    Err(WatchSessionError::WatchLatencyTooHigh { latency_ms: 2001, max_latency_ms: 2000 })
+                ));
+                assert_eq!(shard_wal.watched_aggregates.subscriber_count(), 0);
+
+                let accepted = create_watch_session(&shard_wal, watch(2000), max, 10);
+                assert!(accepted.is_ok());
+                assert_eq!(shard_wal.watched_aggregates.subscriber_count(), 1);
+
+                drop(accepted);
+                shard_wal.close().await;
+                std::fs::remove_dir_all(dir).unwrap();
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
     // --- Shard ID validation ---
 
     #[test]
@@ -2652,4 +2712,27 @@ mod tests {
         assert!(conn_state.client_has_dict);
     }
 
+    #[test]
+    fn handle_identify_rejects_signature_from_another_key() {
+        use celeriant_crypto::Crypto;
+        let advertised = Crypto::generate_keypair(None).unwrap();
+        let signer = Crypto::generate_keypair(None).unwrap();
+        let nonce = Crypto::generate_nonce().unwrap();
+        let mut req = base_identify_request();
+        req.signature = Some(Crypto::sign_nonce(&signer.private_key_base64, &nonce).unwrap());
+        req.public_key = Some(advertised.public_key_base64);
+        req.nonce = Some(nonce);
+        let mut conn_state = ConnectionState { verified_client_id: None, access_level: None, client_has_dict: false };
+        let result = super::handle_identify(&req, &mut conn_state, &test_config(1, crate::RoutingRule::AggregateId));
+        assert!(matches!(
+            result,
+            Err(ClientResponse::GenericError(ErrorResponse { error_code: error_codes::IDENTIFY_INVALID_SIGNATURE, .. }))
+        ), "{result:?}");
+        assert_eq!(conn_state.verified_client_id, None);
+    }
+
 }
+
+#[cfg(test)]
+#[path = "connection_protocol_tests.rs"]
+mod protocol_tests;

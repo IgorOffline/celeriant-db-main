@@ -1,7 +1,6 @@
 //! Shared construction helpers for the `celeriant_shard` write benchmarks.
 //!
-//! Extracted from `write_benchmark.rs` when `write_probe.rs` was added, so the two targets build
-//! the same `ShardWal` from the same config rather than diverging copies.
+//! Both benchmark targets use the same shard configuration and event construction.
 #![allow(dead_code)]
 
 use std::cell::Cell;
@@ -26,7 +25,7 @@ use celeriant_wal::datablocks::datablock_aggregate_event::DatablockAggregateEven
 pub const SEGMENT_SIZE_BYTES: u64 = 128 * 1024 * 1024;
 
 /// Aggregate namespace `celeriant_bench` writes into, so the probe's routing and key sizes
-/// match the load generator every session 3-5 number was taken with.
+/// match the load generator.
 pub const WORKLOAD_ORG: u128 = 1;
 pub const WORKLOAD_AGG_TYPE: u128 = 1;
 

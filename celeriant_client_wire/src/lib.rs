@@ -135,7 +135,7 @@ pub fn decompress_body<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use celeriant_wire::network::wire_header::PROTOCOL_VERSION_V2;
+    use celeriant_wire::network::wire_header::PROTOCOL_VERSION_V4;
     use futures_lite::future::block_on;
     use futures_lite::io::Cursor;
 
@@ -159,7 +159,7 @@ mod tests {
         async fn round_trip(&mut self, type_id: u32, body: Vec<u8>, compress: bool) -> Result<Vec<u8>, WireError> {
             let frame = build_frame(type_id, body, Some(&self.dict), compress, MAX)?;
             let mut wire = Vec::new();
-            write_frame(&mut wire, &frame, MAX, PROTOCOL_VERSION_V2).await?;
+            write_frame(&mut wire, &frame, MAX, PROTOCOL_VERSION_V4).await?;
             let mut reader = Cursor::new(wire);
             let inframe = read_frame(&mut reader, MAX).await?;
             assert_eq!(inframe.message_type, type_id);

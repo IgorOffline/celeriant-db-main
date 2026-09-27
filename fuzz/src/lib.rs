@@ -85,6 +85,26 @@ pub fn run_wire_header(data: &[u8]) {
     });
 }
 
+/// Exercises both complete-conflict codecs behind their real frame limits.
+pub fn run_conflict_response(data: &[u8]) {
+    use celeriant_msg::process_client_responses::ClientResponse;
+    use celeriant_wal::compression_type::CompressionType;
+    futures_lite::future::block_on(async {
+        let mut reader = futures_lite::io::Cursor::new(data);
+        let Ok(header) = WireHeader::from_reader(&mut reader, 4 * 1024 * 1024).await else { return; };
+        if !matches!(header.message_type, 13 | 14) { return; }
+        let Ok(body) = header.read_variable_body_raw(&mut reader).await else { return; };
+        let plain = match header.compression_type {
+            CompressionType::None => body,
+            CompressionType::ZstdDict => {
+                let Ok(plain) = DICT_CODEC.with(|codec| codec.decompress(&body, header.uncompressed_length as usize)) else { return; };
+                plain
+            }
+        };
+        let _ = ClientResponse::deserialize_body(header.message_type, &plain, header.version);
+    });
+}
+
 // ==================== Target C: serialised_datablock (inline path) ====================
 //
 // `deserialise_datablock`'s `Inline` branch slices
@@ -264,7 +284,7 @@ pub fn run_dual_header_recovery(data: &[u8]) {
     let primary = build_header_slot(primary_src, control & 0b0001 != 0, control & 0b0100 != 0);
     let backup = build_header_slot(backup_src, control & 0b0010 != 0, control & 0b1000 != 0);
 
-    let header = match deserialise_shard_log_header(&primary) {
+    let _header = match deserialise_shard_log_header(&primary) {
         Ok(h) => h,
         Err(_primary_err) => match deserialise_shard_log_header(&backup) {
             Ok(h) => h,
@@ -272,8 +292,6 @@ pub fn run_dual_header_recovery(data: &[u8]) {
         },
     };
 
-    let _ = celeriant_wal::sbbf::contains(&header.aggregate_bloom, 0);
-    let _ = celeriant_wal::sbbf::contains(&header.client_bloom, 0);
 }
 
 /// Builds one HEADER_BLOCK_SIZE_BYTES-sized header slot from fuzzer bytes. `recompute_crc`

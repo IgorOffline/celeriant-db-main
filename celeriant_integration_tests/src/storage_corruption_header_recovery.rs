@@ -3,7 +3,7 @@
 //!
 //! `invariants.md` Durability: "Both the primary header (offset 0) and backup
 //! header (offset `file_len - 512KB`) are written on every fsync. If the
-//! primary is corrupt on open, the backup is used." `p2_3_wal_corruption`
+//! primary is corrupt on open, the backup is used." `wal_corruption`
 //! corrupts a *metablock* and asserts the node refuses to serve; this asserts
 //! the complementary positive path — corrupt only the primary header, keep
 //! the backup intact, and the node must recover and serve every event.

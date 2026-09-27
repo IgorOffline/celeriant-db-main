@@ -17,7 +17,7 @@
 //! follower would attempt to take over — causing a spurious failover. This test
 //! would then fail at the "follower still a follower" assertion.
 //!
-//! Run with: cargo run --bin edge_heartbeat_lock_contention_main
+//! Run with: cargo run --release -p celeriant_integration_tests -- --test edge_heartbeat_lock_contention
 
 use celeriant_client_tokio::celeriant_client::CeleriantClient;
 use crate::{

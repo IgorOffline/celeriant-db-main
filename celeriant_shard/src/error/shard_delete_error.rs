@@ -1,12 +1,13 @@
+use celeriant_msg::response::responses::AggregateConflict;
 use crate::error::{replication_error::ReplicationError, shard_cache_load_error::ShardCacheLoadError, shard_fsync_error::ShardFsyncError};
 
 #[derive(Debug, Clone)]
 pub enum ShardDeleteError {
     AggregateNotExists,
     EmptyDeleteList,
+    ConflictResponseTooLarge { required: Option<u64>, max_size: u64 },
     OptimisticConcurrencyViolation {
-        expected_version: u64,
-        current_aggregate_version: u64,
+        conflicts: Vec<AggregateConflict>,
     },
     AggregateExistsAndCacheError(ShardCacheLoadError),
     ReplicationError(ReplicationError),
@@ -20,6 +21,7 @@ impl ShardDeleteError {
         match self {
             Self::AggregateNotExists => "aggregate_not_exists",
             Self::EmptyDeleteList => "empty_delete_list",
+            Self::ConflictResponseTooLarge { .. } => "conflict_response_too_large",
             Self::OptimisticConcurrencyViolation { .. } => "optimistic_concurrency_violation",
             Self::AggregateExistsAndCacheError(_) => "cache_load_error",
             Self::ReplicationError(_) => "replication_error",

@@ -790,12 +790,7 @@ impl NodePool {
             let dict_cache_ref = Arc::clone(dict_cache);
             client.identify_with_known_sha(identity, known_sha, move |sha| {
                 dict_cache_ref.lock().unwrap().cache.get(sha).cloned()
-            }).await.map_err(|e| match e {
-                // The handshake stalled, not the caller's request: nothing of
-                // theirs was serialised, so this is a pre-send connect failure.
-                ClientError::RequestTimeout => ClientError::ConnectionTimeout,
-                other => other,
-            })?;
+            }).await.map_err(ClientError::before_mutation)?;
 
             // If the client received new dict bytes, store them in the pool cache.
             if let Some(ref d) = client.current_dict {
@@ -2069,7 +2064,7 @@ mod tests {
         use celeriant_msg::response::responses::{ErrorResponse, WatchResponse};
         use celeriant_wal::builtin_dict::BUILTIN_DICT_BYTES;
         use celeriant_wire::codec::compression::DictCodec;
-        use celeriant_wire::network::wire_header::{PROTOCOL_VERSION_V2, WireHeader};
+        use celeriant_wire::network::wire_header::PROTOCOL_VERSION_V4;
         use tokio_util::compat::TokioAsyncReadCompatExt;
 
         const MAX: u64 = 64 * 1024 * 1024;
@@ -2090,7 +2085,7 @@ mod tests {
                     let mut stream = socket.compat();
                     let codec = DictCodec::new(BUILTIN_DICT_BYTES, 3).unwrap();
                     loop {
-                        let Ok(header) = WireHeader::from_reader(&mut stream, MAX).await else {
+                        let Ok(header) = crate::test_support::request_header(&mut stream, MAX).await else {
                             return;
                         };
                         let Ok(request) =
@@ -2121,7 +2116,7 @@ mod tests {
                             ),
                         };
                         if ClientResponse::write_response(
-                            &mut stream, &resp, false, &codec, MAX, PROTOCOL_VERSION_V2,
+                            &mut stream, &resp, false, &codec, MAX, PROTOCOL_VERSION_V4,
                         ).await.is_err() {
                             return;
                         }
@@ -2679,7 +2674,7 @@ mod tests {
 
     #[test]
     fn a_timed_out_or_broken_connection_is_never_returned_to_the_free_list() {
-        // The phase-5 cardinality_pressure failure: `read_all` timed out on a
+        // A cold-read timeout can poison subsequent requests: `read_all` timed out on a
         // cold read, the desynchronised connection went back into the FIFO
         // free list, and the next task read the late response as its own reply.
         // A 99.2% error rate over 12,000 reads followed.
@@ -2737,7 +2732,7 @@ mod tests {
         }
     }
 
-    // Blind-oracle correlation-id tests (contract authored unseen).
+    // Correlation mismatch must retire the connection.
     //
     // Nothing but stream ordering binds a response to its request. When that
     // ordering slips, the client hands back a plausible answer that belongs to
@@ -2896,7 +2891,7 @@ mod tests {
         use celeriant_msg::response::watch_event::WatchResponseEvent;
         use celeriant_wal::builtin_dict::BUILTIN_DICT_BYTES;
         use celeriant_wire::codec::compression::DictCodec;
-        use celeriant_wire::network::wire_header::{PROTOCOL_VERSION_V2, WireHeader};
+        use celeriant_wire::network::wire_header::PROTOCOL_VERSION_V4;
         use tokio_util::compat::TokioAsyncReadCompatExt;
 
         const MAX: u64 = 64 * 1024 * 1024;
@@ -2912,7 +2907,7 @@ mod tests {
                     tokio::task::spawn_local(async move {
                         let mut stream = socket.compat();
                         let codec = DictCodec::new(BUILTIN_DICT_BYTES, 3).unwrap();
-                        let Ok(header) = WireHeader::from_reader(&mut stream, MAX).await else {
+                        let Ok(header) = crate::test_support::request_header(&mut stream, MAX).await else {
                             return;
                         };
                         let Ok(_request) =
@@ -2922,7 +2917,7 @@ mod tests {
                         };
                         let ack = ClientResponse::Watch(WatchResponse { events: Vec::new() });
                         if ClientResponse::write_response(
-                            &mut stream, &ack, false, &codec, MAX, PROTOCOL_VERSION_V2,
+                            &mut stream, &ack, false, &codec, MAX, PROTOCOL_VERSION_V4,
                         ).await.is_err() {
                             return;
                         }
@@ -2938,7 +2933,7 @@ mod tests {
                             }).collect(),
                         });
                         let _ = ClientResponse::write_response(
-                            &mut stream, &big, false, &codec, MAX, PROTOCOL_VERSION_V2,
+                            &mut stream, &big, false, &codec, MAX, PROTOCOL_VERSION_V4,
                         ).await;
                     });
                 }
@@ -3047,7 +3042,6 @@ mod tests {
     async fn read_error_server() -> std::net::SocketAddr {
         use celeriant_wal::builtin_dict::BUILTIN_DICT_BYTES;
         use celeriant_wire::codec::compression::DictCodec;
-        use celeriant_wire::network::wire_header::WireHeader;
         use tokio_util::compat::TokioAsyncReadCompatExt;
 
         const MAX: u64 = 64 * 1024 * 1024;
@@ -3063,7 +3057,7 @@ mod tests {
                     tokio::task::spawn_local(async move {
                         let mut stream = socket.compat();
                         let codec = DictCodec::new(BUILTIN_DICT_BYTES, 3).unwrap();
-                        let Ok(header) = WireHeader::from_reader(&mut stream, MAX).await else {
+                        let Ok(header) = crate::test_support::request_header(&mut stream, MAX).await else {
                             return;
                         };
                         let Ok(_request) =
@@ -3125,7 +3119,7 @@ mod tests {
     async fn oversized_read_server() -> std::net::SocketAddr {
         use celeriant_wal::builtin_dict::BUILTIN_DICT_BYTES;
         use celeriant_wire::codec::compression::DictCodec;
-        use celeriant_wire::network::wire_header::{PROTOCOL_VERSION_V2, WireHeader};
+        use celeriant_wire::network::wire_header::PROTOCOL_VERSION_V4;
         use tokio_util::compat::TokioAsyncReadCompatExt;
 
         const MAX: u64 = 64 * 1024 * 1024;
@@ -3142,7 +3136,7 @@ mod tests {
                         let mut stream = socket.compat();
                         let codec = DictCodec::new(BUILTIN_DICT_BYTES, 3).unwrap();
                         loop {
-                            let Ok(header) = WireHeader::from_reader(&mut stream, MAX).await else {
+                            let Ok(header) = crate::test_support::request_header(&mut stream, MAX).await else {
                                 return;
                             };
                             let Ok(request) =
@@ -3172,7 +3166,7 @@ mod tests {
                                 next_aggregate_version: None,
                             });
                             if ClientResponse::write_response(
-                                &mut stream, &resp, false, &codec, MAX, PROTOCOL_VERSION_V2,
+                                &mut stream, &resp, false, &codec, MAX, PROTOCOL_VERSION_V4,
                             ).await.is_err() {
                                 return;
                             }
@@ -3294,7 +3288,7 @@ mod tests {
         use celeriant_msg::response::responses::{ErrorResponse, WriteResponse};
         use celeriant_wal::builtin_dict::BUILTIN_DICT_BYTES;
         use celeriant_wire::codec::compression::DictCodec;
-        use celeriant_wire::network::wire_header::{PROTOCOL_VERSION_V2, WireHeader};
+        use celeriant_wire::network::wire_header::PROTOCOL_VERSION_V4;
         use tokio_util::compat::TokioAsyncReadCompatExt;
 
         const MAX: u64 = 64 * 1024 * 1024;
@@ -3322,10 +3316,10 @@ mod tests {
                         'session: loop {
                             let header = match close.as_mut() {
                                 Some((closing, _)) => tokio::select! {
-                                    h = WireHeader::from_reader(&mut stream, MAX) => h,
+                                    h = crate::test_support::request_header(&mut stream, MAX) => h,
                                     _ = closing.changed() => break 'session,
                                 },
-                                None => WireHeader::from_reader(&mut stream, MAX).await,
+                                None => crate::test_support::request_header(&mut stream, MAX).await,
                             };
                             let Ok(header) = header else {
                                 return;
@@ -3348,7 +3342,7 @@ mod tests {
                                 // 17-byte header: version, message type (Write),
                                 // compressed len, uncompressed len, compression.
                                 let mut frame = Vec::with_capacity(18);
-                                frame.extend_from_slice(&PROTOCOL_VERSION_V2.to_le_bytes());
+                                frame.extend_from_slice(&PROTOCOL_VERSION_V4.to_le_bytes());
                                 frame.extend_from_slice(&3u32.to_le_bytes());
                                 frame.extend_from_slice(&1u32.to_le_bytes());
                                 frame.extend_from_slice(&1u32.to_le_bytes());
@@ -3394,7 +3388,7 @@ mod tests {
                                 ),
                             };
                             if ClientResponse::write_response(
-                                &mut stream, &resp, false, &codec, MAX, PROTOCOL_VERSION_V2,
+                                &mut stream, &resp, false, &codec, MAX, PROTOCOL_VERSION_V4,
                             )
                             .await
                             .is_err()
@@ -3971,4 +3965,3 @@ mod tests {
         );
     }
 }
-

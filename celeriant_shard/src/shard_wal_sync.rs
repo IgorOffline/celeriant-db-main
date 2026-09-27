@@ -1536,7 +1536,7 @@ use glommio::{LocalExecutorBuilder, Placement};
         assert!(overlapping(check_batch_write_ranges(8192, 12288, 4096, u64::MAX)));
     }
 
-    /// C7 measurement harness, not a CI assertion (goal Phase 3): the rotation-batch
+    /// Measurement harness, not a CI assertion: the rotation-batch
     /// ack penalty of the inline FullCommit sidecar write — serialize + BufferedFile
     /// create + write + fdatasync. Run explicitly:
     /// `cargo test -p celeriant_shard --release -- --ignored sidecar_write_wall_time --nocapture`
@@ -1572,12 +1572,12 @@ use glommio::{LocalExecutorBuilder, Placement};
         });
     }
 
-    /// C6 measurement harness, not a CI assertion (goal Phase 4): serial vs joined
+    /// Measurement harness, not a CI assertion: serial vs joined
     /// datablock+metablock submit in `sync()`, driven through the real function on
     /// real DmaFiles. Run explicitly, one process per run, three runs or more:
     /// `cargo test -p celeriant_shard --release -- --ignored wal_join_write_wall_time --nocapture`
     ///
-    /// Methodology (goal Phase 4, binding): modes interleave in blocks inside one
+    /// Methodology: modes interleave in blocks inside one
     /// process; the segment's unwritten extents are converted before the first
     /// measured batch (otherwise the first mode pays xfs extent conversion inside
     /// every fdatasync and the A/B is invalid); the write portion is reported apart
@@ -1728,18 +1728,15 @@ use glommio::{LocalExecutorBuilder, Placement};
         rows.iter().map(|r| phase_ns(r, phase)).sum::<u64>() / rows.len() as u64 / 1000
     }
 
-    /// C5 measurement harness, not a CI assertion (goal Phase 3): wall time of the
+    /// Measurement harness, not a CI assertion: wall time of the
     /// sync-path serialize + hash-chain loop at production batch sizes, to compare
     /// against the chosen preempt timer. Run explicitly:
     /// `cargo test -p celeriant_shard --release -- --ignored checksum_loop_wall_time --nocapture`
     #[test]
     #[ignore]
     fn checksum_loop_wall_time_measurement() {
-        // Runs under a 1 ms preempt timer (the shipped default is 250 us — 4x the
-        // fire rate measured here; re-measure debt recorded in session scraps), not
-        // glommio_test!'s default
-        // (100 ms, under which yield_if_needed never fires and the with_yield rows
-        // measure nothing — the tautology the Phase 3 review caught).
+        // Use 1 ms rather than glommio_test!'s 100 ms so yield_if_needed fires.
+        // This measures a lower preemption rate than the shipped 250 us default.
         LocalExecutorBuilder::new(Placement::Fixed(0))
             .preempt_timer(std::time::Duration::from_millis(1))
             .spawn(|| async move {

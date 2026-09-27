@@ -27,7 +27,7 @@ Versioned Block (WAL/S3 persistence)
 - Version is checked after CRC validation. This distinguishes corruption from format incompatibility. Unknown versions are rejected with `UnsupportedVersion`.
 - Both `compressed_length` and `uncompressed_length` are validated against `max_size_bytes` before any allocation or decompression. Prevents decompression bombs.
 - Messages that fit in a fixed-size buffer (header + body <= 1024 bytes, no compression) must be stack-allocated. Heap allocation for small messages is prohibited.
-- Two protocol versions: V2 (bincode, fixed-int, little-endian) and V3 (MessagePack). V0, V1, V4+ are rejected with `UnsupportedProtocol`.
+- Two protocol versions: V4 (bincode, fixed-int, little-endian) and V5 (MessagePack). Every other version is rejected with `UnsupportedProtocol`.
 - Protocol version is set on the first message. No renegotiation.
 - All on-disk structures use bincode with fixed-width integer encoding and little-endian byte order. No varints.
 
@@ -62,8 +62,8 @@ Versioned Block (WAL/S3 persistence)
 
 | Version | Format | Use case |
 |---------|--------|----------|
-| V2 | bincode | Rust clients (~7x faster) |
-| V3 | msgpack | Non-Rust clients (standard format) |
+| V4 | bincode | Rust clients and internode (~7x faster) |
+| V5 | msgpack | Non-Rust clients (standard format) |
 
 Both use identical wire framing and compression; only payload encoding differs.
 

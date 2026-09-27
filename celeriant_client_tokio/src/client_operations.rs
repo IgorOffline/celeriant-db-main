@@ -143,3 +143,74 @@ mod tests {
         );
     }
 }
+
+/// Atomic same-shard appends and version guards. Duplicate keys reject the batch.
+pub struct WriteBatch<'a> {
+    target: BatchTarget<'a>,
+    request: WriteRequest,
+    duplicate_key: bool,
+}
+
+enum BatchTarget<'a> {
+    Client(&'a mut CeleriantClient),
+    Pool(&'a crate::CeleriantPool),
+}
+
+impl<'a> WriteBatch<'a> {
+    fn new(target: BatchTarget<'a>, client_id: u128) -> Self {
+        Self { target, request: WriteRequest { correlation_id: None, client_id, user_id: None, writes: HashMap::new() }, duplicate_key: false }
+    }
+
+    pub fn append(self, key: AggregateKey, events: Vec<DatablockAggregateEvent>) -> Self {
+        self.append_with(key, events, WriteEventsOptions::default())
+    }
+
+    pub fn append_with(self, key: AggregateKey, events: Vec<DatablockAggregateEvent>, options: WriteEventsOptions) -> Self {
+        self.entry(key, SingleAggregateWrite {
+            events,
+            allow_create: options.allow_create,
+            expected_version: options.expected_version,
+            enforce_client_idempotency: options.enforce_client_idempotency,
+        })
+    }
+
+    /// Observe this head in the same decision as all appends, without adding an event.
+    pub fn guard(self, key: AggregateKey, expected_version: u64) -> Self {
+        self.entry(key, SingleAggregateWrite {
+            events: Vec::new(),
+            allow_create: false,
+            expected_version: Some(expected_version),
+            enforce_client_idempotency: false,
+        })
+    }
+
+    fn entry(mut self, key: AggregateKey, write: SingleAggregateWrite) -> Self {
+        match self.request.writes.entry(key) {
+            std::collections::hash_map::Entry::Vacant(entry) => { entry.insert(write); }
+            std::collections::hash_map::Entry::Occupied(_) => self.duplicate_key = true,
+        }
+        self
+    }
+
+    pub async fn send(self) -> Result<WriteResponse, ClientError> {
+        if self.duplicate_key {
+            return Err(ClientError::ProtocolError);
+        }
+        match self.target {
+            BatchTarget::Client(client) => client.write(self.request).await,
+            BatchTarget::Pool(pool) => pool.write(self.request).await,
+        }
+    }
+}
+
+impl CeleriantClient {
+    pub fn write_batch(&mut self, client_id: u128) -> WriteBatch<'_> {
+        WriteBatch::new(BatchTarget::Client(self), client_id)
+    }
+}
+
+impl crate::CeleriantPool {
+    pub fn write_batch(&self, client_id: u128) -> WriteBatch<'_> {
+        WriteBatch::new(BatchTarget::Pool(self), client_id)
+    }
+}

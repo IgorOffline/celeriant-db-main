@@ -57,7 +57,7 @@ where
 mod tests {
     use super::*;
     use crate::response::responses::AccessLevel;
-    use celeriant_wire::network::wire_header::{PROTOCOL_VERSION_V2, PROTOCOL_VERSION_V3, WIRE_HEADER_SIZE};
+    use celeriant_wire::network::wire_header::{PROTOCOL_VERSION_V4, PROTOCOL_VERSION_V5, WIRE_HEADER_SIZE};
     use futures_lite::{future::block_on, io::Cursor};
 
     fn sample_request() -> IdentifyRequest {
@@ -93,7 +93,7 @@ mod tests {
     #[test]
     fn request_round_trip() {
         block_on(async {
-            for &version in &[PROTOCOL_VERSION_V2, PROTOCOL_VERSION_V3] {
+            for &version in &[PROTOCOL_VERSION_V4, PROTOCOL_VERSION_V5] {
                 let req = sample_request();
                 let mut buf = Vec::new();
                 write_identify_request(&mut buf, &req, version).await.unwrap();
@@ -126,7 +126,7 @@ mod tests {
                 api_key: None,
                 known_dict_sha256: Some("abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890".to_string()),
             };
-            for &version in &[PROTOCOL_VERSION_V2, PROTOCOL_VERSION_V3] {
+            for &version in &[PROTOCOL_VERSION_V4, PROTOCOL_VERSION_V5] {
                 let mut buf = Vec::new();
                 write_identify_request(&mut buf, &req, version).await.unwrap();
                 let mut cursor = Cursor::new(buf.clone());
@@ -141,7 +141,7 @@ mod tests {
     #[test]
     fn response_round_trip() {
         block_on(async {
-            for &version in &[PROTOCOL_VERSION_V2, PROTOCOL_VERSION_V3] {
+            for &version in &[PROTOCOL_VERSION_V4, PROTOCOL_VERSION_V5] {
                 let res = sample_response();
                 let parsed = roundtrip_response(&res, version).await;
                 assert_eq!(parsed.correlation_id, res.correlation_id);
@@ -165,7 +165,7 @@ mod tests {
                 compression_dict_bytes: Some(vec![1, 2, 3, 4]),
             };
             let mut buf = Vec::new();
-            write_identify_response(&mut buf, &res, PROTOCOL_VERSION_V2).await.unwrap();
+            write_identify_response(&mut buf, &res, PROTOCOL_VERSION_V4).await.unwrap();
             let mut cursor = Cursor::new(buf);
             let header = WireHeader::from_reader(&mut cursor, u64::MAX).await.unwrap();
             assert_eq!(header.compression_type, celeriant_wal::compression_type::CompressionType::None);
@@ -185,7 +185,7 @@ mod tests {
                 compression_dict_sha256: Some(sha.clone()),
                 compression_dict_bytes: Some(dict_bytes.clone()),
             };
-            for &version in &[PROTOCOL_VERSION_V2, PROTOCOL_VERSION_V3] {
+            for &version in &[PROTOCOL_VERSION_V4, PROTOCOL_VERSION_V5] {
                 let parsed = roundtrip_response(&res, version).await;
                 assert_eq!(parsed.compression_dict_sha256.as_deref(), Some(sha.as_str()));
                 assert_eq!(parsed.compression_dict_bytes.as_deref(), Some(dict_bytes.as_slice()));
@@ -205,7 +205,7 @@ mod tests {
                 compression_dict_sha256: Some(sha.clone()),
                 compression_dict_bytes: None,
             };
-            for &version in &[PROTOCOL_VERSION_V2, PROTOCOL_VERSION_V3] {
+            for &version in &[PROTOCOL_VERSION_V4, PROTOCOL_VERSION_V5] {
                 let parsed = roundtrip_response(&res, version).await;
                 assert_eq!(parsed.compression_dict_sha256.as_deref(), Some(sha.as_str()));
                 assert_eq!(parsed.compression_dict_bytes, None);
@@ -224,7 +224,7 @@ mod tests {
                 compression_dict_sha256: None,
                 compression_dict_bytes: None,
             };
-            for &version in &[PROTOCOL_VERSION_V2, PROTOCOL_VERSION_V3] {
+            for &version in &[PROTOCOL_VERSION_V4, PROTOCOL_VERSION_V5] {
                 let parsed = roundtrip_response(&res, version).await;
                 assert_eq!(parsed.compression_dict_sha256, None);
                 assert_eq!(parsed.compression_dict_bytes, None);

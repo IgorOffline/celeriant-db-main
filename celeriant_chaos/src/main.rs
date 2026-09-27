@@ -24,6 +24,7 @@ use celeriant_chaos::scenario::{
     run_cardinality_pressure, run_cold_connect_herd,
 };
 use celeriant_chaos::cardinality_workload::{CardinalityParams, Preset};
+use celeriant_chaos::guard_fence::{self, GuardFault};
 
 #[derive(Parser)]
 #[command(name = "celeriant-chaos", about = "Chaos test orchestrator for the RPi cluster")]
@@ -272,6 +273,10 @@ async fn main() -> Result<(), String> {
     };
 
     let scenarios_to_run: Vec<&str> = match args.scenario.as_deref() {
+        Some("guard_fence_contention") => vec!["guard_fence_contention"],
+        Some("guard_fence_leader_kill") => vec!["guard_fence_leader_kill"],
+        Some("guard_fence_partition_heal") => vec!["guard_fence_partition_heal"],
+        Some("guard_fence_rollback") => vec!["guard_fence_rollback"],
         Some("baseline") => vec!["baseline"],
         Some("follower_graceful_stop") => vec!["follower_graceful_stop"],
         Some("follower_sigkill") => vec!["follower_sigkill"],
@@ -387,6 +392,10 @@ async fn run_one_iteration(
     let mut reports = Vec::new();
     for name in scenarios_to_run {
         let report = match *name {
+            "guard_fence_contention" => guard_fence::run(cfg, params, &dir.root, GuardFault::Contention).await?,
+            "guard_fence_leader_kill" => guard_fence::run(cfg, params, &dir.root, GuardFault::LeaderKill).await?,
+            "guard_fence_partition_heal" => guard_fence::run(cfg, params, &dir.root, GuardFault::PartitionHeal).await?,
+            "guard_fence_rollback" => guard_fence::run(cfg, params, &dir.root, GuardFault::Rollback).await?,
             "baseline" => run_baseline(cfg, params, &dir.root).await?,
             "watch_storm" => run_watch_storm(cfg, params, &dir.root).await?,
             "watch_storm_failover" => run_watch_storm_failover(cfg, params, &dir.root).await?,

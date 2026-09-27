@@ -20,7 +20,7 @@
 //! watchdog would fire, causing a spurious failover. This test would fail at the
 //! "both nodes alive" or "follower still a follower" assertion.
 //!
-//! Run with: cargo run --bin edge_concurrent_heartbeat_replication_s3_main
+//! Run with: cargo run --release -p celeriant_integration_tests -- --test edge_concurrent_heartbeat_replication_s3
 
 use celeriant_client_tokio::celeriant_client::CeleriantClient;
 use crate::{

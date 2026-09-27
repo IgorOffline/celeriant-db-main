@@ -19,7 +19,7 @@
 //!
 //! This is test #6 in the integration test coverage report.
 //!
-//! Run with: cargo run --bin edge_s3_batch_ordering_main
+//! Run with: cargo run --release -p celeriant_integration_tests -- --test edge_s3_batch_ordering
 
 use celeriant_client_tokio::celeriant_client::CeleriantClient;
 use crate::{

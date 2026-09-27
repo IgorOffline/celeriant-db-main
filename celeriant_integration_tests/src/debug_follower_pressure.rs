@@ -11,7 +11,7 @@
 //!   MinIO:    11010
 //!   Proxy:    11200 → 11101
 //!
-//! Run with: cargo run --bin debug_follower_pressure_main
+//! Run with: cargo run --release -p celeriant_integration_tests -- --test debug_follower_pressure
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};

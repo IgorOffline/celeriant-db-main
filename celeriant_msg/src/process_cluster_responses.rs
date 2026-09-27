@@ -116,11 +116,11 @@ impl ClusterResponse {
 mod tests {
     use super::*;
     use crate::response::responses::{HeartbeatRejection, HeartbeatResult, ReplicationResult};
-    use celeriant_wire::network::wire_header::{PROTOCOL_VERSION_V2, PROTOCOL_VERSION_V3, WIRE_HEADER_SIZE};
+    use celeriant_wire::network::wire_header::{PROTOCOL_VERSION_V4, PROTOCOL_VERSION_V5, WIRE_HEADER_SIZE};
     use futures_lite::{future::block_on, io::Cursor};
 
     const COUNT: usize = 5;
-    const VERSIONS: [u32; 2] = [PROTOCOL_VERSION_V2, PROTOCOL_VERSION_V3];
+    const VERSIONS: [u32; 2] = [PROTOCOL_VERSION_V4, PROTOCOL_VERSION_V5];
 
     fn all_types() -> [ClusterResponseType; COUNT] {
         [
@@ -216,7 +216,7 @@ mod tests {
         block_on(async {
             for rt in all_types() {
                 let res = make_response(rt);
-                let bytes = write_bytes(&res, PROTOCOL_VERSION_V2).await;
+                let bytes = write_bytes(&res, PROTOCOL_VERSION_V4).await;
                 let compression_byte = bytes[16];
                 assert_eq!(compression_byte, 0, "{:?} should be fixed-size with no compression", rt);
             }
@@ -253,7 +253,7 @@ mod tests {
     fn truncated_stream_fails() {
         block_on(async {
             let res = make_response(ClusterResponseType::Heartbeat);
-            let bytes = write_bytes(&res, PROTOCOL_VERSION_V2).await;
+            let bytes = write_bytes(&res, PROTOCOL_VERSION_V4).await;
 
             for truncate_at in [0, 10, bytes.len() - 1] {
                 let truncated = &bytes[..truncate_at];
@@ -273,7 +273,7 @@ mod tests {
     fn invalid_message_type_fails() {
         block_on(async {
             let res = make_response(ClusterResponseType::Heartbeat);
-            let mut bytes = write_bytes(&res, PROTOCOL_VERSION_V2).await;
+            let mut bytes = write_bytes(&res, PROTOCOL_VERSION_V4).await;
 
             bytes[4..8].copy_from_slice(&99u32.to_le_bytes());
             let header = WireHeader::from_reader(&mut Cursor::new(bytes.clone()), u64::MAX).await.unwrap();

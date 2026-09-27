@@ -12,7 +12,7 @@ use celeriant_client_wire::{build_frame, write_frame};
 use celeriant_msg::process_identify::{read_identify_request, write_identify_response};
 use celeriant_msg::response::responses::IdentifyResponse;
 use celeriant_wire::network::wire_error::WireError;
-use celeriant_wire::network::wire_header::{PROTOCOL_VERSION_V2, WireHeader};
+use celeriant_wire::network::wire_header::{PROTOCOL_VERSION_V4, WireHeader};
 use futures_lite::AsyncWriteExt;
 use tokio_util::compat::TokioAsyncReadCompatExt;
 
@@ -52,7 +52,7 @@ fn dict_sha_only_server() -> Fake {
                     compression_dict_sha256: Some(UNCACHED_SHA.to_string()),
                     compression_dict_bytes: None,
                 };
-                let _ = write_identify_response(&mut stream, &resp, PROTOCOL_VERSION_V2).await;
+                let _ = write_identify_response(&mut stream, &resp, PROTOCOL_VERSION_V4).await;
                 let _ = stream.flush().await;
                 std::future::pending::<()>().await
             });
@@ -183,7 +183,7 @@ async fn the_pre_and_post_compression_rejections_are_the_same_error() {
     // The same body waved past build_frame's cap, judged by write_frame instead.
     let frame = build_frame(3, body, None, false, u64::MAX).expect("no cap, no rejection");
     let mut sink = Vec::new();
-    let post = write_frame(&mut sink, &frame, TINY_MAX, PROTOCOL_VERSION_V2)
+    let post = write_frame(&mut sink, &frame, TINY_MAX, PROTOCOL_VERSION_V4)
         .await
         .expect_err("write_frame rejects it too");
 

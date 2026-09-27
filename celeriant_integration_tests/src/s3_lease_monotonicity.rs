@@ -15,7 +15,7 @@
 //!
 //! This chains: Leader A → Leader B → Leader A, with lease_epoch going 1 → 2 → 3.
 //!
-//! Run with: cargo run --bin s3_lease_monotonicity_main
+//! Run with: cargo run --release -p celeriant_integration_tests -- --test s3_lease_monotonicity
 
 use celeriant_client_tokio::celeriant_client::CeleriantClient;
 use crate::{count_events, poll_converged_count, wait_for_leader, write_event, MinioContainer, ServerConfig, TestServer, FOLLOWER_CONVERGENCE_TIMEOUT};

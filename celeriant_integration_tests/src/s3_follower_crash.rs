@@ -17,7 +17,7 @@
 //! 9. Wait for follower to re-register and rejoin cluster
 //! 10. Verify follower receives replicated data from leader
 //!
-//! Run with: cargo run --bin s3_follower_crash_main
+//! Run with: cargo run --release -p celeriant_integration_tests -- --test s3_follower_crash
 
 use celeriant_client_tokio::celeriant_client::CeleriantClient;
 use crate::{poll_converged_count, poll_event_count, s3_cluster_config, write_event, MinioContainer, TestServer, FOLLOWER_CONVERGENCE_TIMEOUT};

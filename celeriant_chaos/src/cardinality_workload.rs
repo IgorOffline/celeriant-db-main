@@ -681,7 +681,7 @@ pub enum FillWriteError {
     Idempotency,
     /// An OCC violation the server did not attach a current version to, so
     /// `occ_conflict_version` cannot resync and the write lands here instead of
-    /// in `occ_retries`. Session-v1's reheat storm arrived by this door.
+    /// in `occ_retries`.
     OccNoVersion,
     ServerOther,
     /// The write read a response bound to a different request. Like its read-side
@@ -1518,7 +1518,7 @@ mod tests {
             (write_err(WriteError::ReplicationBackpressure), FillWriteError::Backpressure),
             (write_err(WriteError::InflightDuplicateWrite { last_client_seq: None, attempted_client_seq: None }), FillWriteError::InflightDuplicate),
             (write_err(WriteError::ClientIdempotencyViolation { last_client_seq: None, attempted_client_seq: None }), FillWriteError::Idempotency),
-            (write_err(WriteError::OptimisticConcurrencyViolation { expected_version: Some(3), current_aggregate_version: None }), FillWriteError::OccNoVersion),
+            (write_err(WriteError::OptimisticConcurrencyViolation { expected_version: Some(3), current_aggregate_version: None, conflicts: vec![] }), FillWriteError::OccNoVersion),
             (write_err(WriteError::FsyncError), FillWriteError::ServerOther),
             // Never the catch-all: this is the one kind here that no injected
             // fault can produce, so it must stay distinguishable.
@@ -1562,10 +1562,12 @@ mod tests {
         let occ_current = WriteError::OptimisticConcurrencyViolation {
             expected_version: Some(10),
             current_aggregate_version: Some(11),
+            conflicts: vec![],
         };
         let occ_bare = WriteError::OptimisticConcurrencyViolation {
             expected_version: Some(10),
             current_aggregate_version: None,
+            conflicts: vec![],
         };
         let dup = || WriteError::ClientIdempotencyViolation {
             last_client_seq: Some(5),
@@ -1603,6 +1605,7 @@ mod tests {
         let occ = write_err(WriteError::OptimisticConcurrencyViolation {
             expected_version: Some(10),
             current_aggregate_version: Some(11),
+            conflicts: vec![],
         });
         assert_eq!(classify_write_failure(&occ, a.unacked), FillRetry::Resync(11));
         a.version = 11;

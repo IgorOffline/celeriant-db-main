@@ -9,7 +9,7 @@
 //! the exact expected count within `FOLLOWER_CONVERGENCE_TIMEOUT`. Leader
 //! reads stay immediate.
 //!
-//! Run with: cargo run --bin follower_read_snapshot_main
+//! Run with: cargo run --release -p celeriant_integration_tests -- --test follower_read_snapshot
 
 use celeriant_client_tokio::celeriant_client::CeleriantClient;
 use crate::{

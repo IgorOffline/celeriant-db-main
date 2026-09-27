@@ -1,18 +1,6 @@
-//! Blind contract tests for role-transition tail reconciliation
-//! (Phase 2, edges 2/3/5/8). These test the PROMISED behavior of
-//! `ShardWal::reconcile_durable_tail(TailReconciliation)` per the enum's doc
-//! comments: `CommitForPromotion` commits a peer-received deferred tail
-//! (read == write, tail readable, parked watch events fire exactly once in
-//! order); `ReconcileAsFollower` keeps a peer tail parked but still culls an
-//! own-speculation tail; `RewindToAckBarrier` is unchanged.
-//!
-//! All `contract_*` tests are expected RED on the current code (which still
-//! culls any `read < write` tail on promotion); `unchanged_*` tests must be
-//! green throughout.
-//!
-//! Scaffolding is copied from follower_commit_contract_tests.rs: real wire
-//! batches captured from a real leader shard, disk-truth cursor observation
-//! via a reopened LogSegmentsCache.
+//! Promotion commits a peer-received deferred tail and releases parked watch events
+//! once, in order. Follower reconciliation keeps that tail parked but culls local
+//! speculation. Tests capture real leader batches and reopen the WAL to verify cursors.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -439,8 +427,6 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) {
 ///   edge3 — entries durable to N, last carrier confirmed N-1 (old leader
 ///           acked N and died before broadcasting the commit index);
 ///   edge2 — wholly unacked tail (no carrier ever confirmed anything).
-/// Expected RED on current code: the old cull rewinds write down to read,
-/// destroying the peer tail (and with it acked writes).
 #[test]
 fn contract_promotion_commits_peer_received_deferred_tail() {
     glommio_test!({
@@ -499,8 +485,6 @@ fn contract_promotion_commits_peer_received_deferred_tail() {
 /// INVARIANT: a follower subscriber's parked events for the tail committed by
 /// promotion FIRE at promotion, exactly once each, in wal_seq order; entries
 /// already confirmed pre-promotion are not re-fired.
-/// Expected RED on current code: the cull discards the parked tail and its
-/// events never fire.
 #[test]
 fn contract_promotion_fires_parked_watch_events_exactly_once_in_order() {
     glommio_test!({
@@ -557,7 +541,6 @@ fn contract_promotion_fires_parked_watch_events_exactly_once_in_order() {
 /// INVARIANT: promotion commits the durable tail even when the deferred state
 /// exists only on disk — the follower crashed and restarted (header shows
 /// read < write, no in-memory parked state) before `CommitForPromotion`.
-/// Expected RED on current code: the cull destroys the on-disk tail.
 #[test]
 fn contract_promotion_after_restart_commits_tail_from_disk() {
     glommio_test!({
@@ -600,8 +583,6 @@ fn contract_promotion_after_restart_commits_tail_from_disk() {
 /// INVARIANT: `ReconcileAsFollower` with a peer-received tail KEEPS it: write
 /// cursor unchanged (entries still durable), read unchanged (still invisible),
 /// and a later covering carrier commits it.
-/// Expected RED on current code: the old behavior destroys the tail (write
-/// rewinds to read).
 #[test]
 fn contract_reconcile_as_follower_keeps_peer_tail_durable_and_parked() {
     glommio_test!({
@@ -651,8 +632,6 @@ fn contract_reconcile_as_follower_keeps_peer_tail_durable_and_parked() {
 /// INVARIANT (edge 8, follower side): `ReconcileAsFollower` fires no watch
 /// events (the tail stays parked); the covering carrier that later commits the
 /// kept tail fires each parked event exactly once, in wal_seq order.
-/// Expected RED on current code: the cull destroys the tail, so the covering
-/// carrier (a duplicate whose chain no longer matches) commits nothing.
 #[test]
 fn contract_reconcile_as_follower_tail_commits_later_with_events_exactly_once() {
     glommio_test!({
@@ -766,8 +745,6 @@ fn unchanged_demotion_rewind_to_ack_barrier_culls_own_tail() {
 /// batches received since — nothing from the pre-demotion speculation
 /// resurrects. Order must hold: cull first, clean peer tail after, commit on
 /// re-promote.
-/// Expected RED on current code: `CommitForPromotion` culls the parked peer
-/// tail instead of committing it.
 #[test]
 fn contract_repromotion_commits_only_peer_tail_after_demotion_cull() {
     glommio_test!({

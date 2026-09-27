@@ -1,3 +1,4 @@
+use celeriant_msg::response::responses::AggregateConflict;
 use celeriant_wire::codec::codec_error::CodecError;
 
 use crate::error::{replication_error::ReplicationError, shard_cache_load_error::ShardCacheLoadError, shard_fsync_error::ShardFsyncError};
@@ -6,6 +7,7 @@ use crate::error::{replication_error::ReplicationError, shard_cache_load_error::
 pub enum ShardWriteError {
     /// Write request contained no events.
     EmptyEventsList,
+    MalformedGuardEntry,
 
     /// Event type 0 is reserved as a sentinel value.
     ZeroEventType {
@@ -25,17 +27,18 @@ pub enum ShardWriteError {
         attempted_client_seq: u64,
     },
 
-    /// Expected aggregate_version doesn't match current aggregate state.
+    ConflictResponseTooLarge { required: Option<u64>, max_size: u64 },
+
+    /// Every OCC mismatch from the same final validation decision.
     OptimisticConcurrencyViolation {
-        expected_version: u64,
-        current_aggregate_version: u64,
+        conflicts: Vec<AggregateConflict>,
     },
 
     FailedToSerialiseDatablocks(CodecError),
 
     AggregateNotExists,
 
-    /// Aggregate was deleted with allow_recreate=false and cannot be recreated
+    /// Appending cannot recreate this aggregate, or a guard targets a tombstone.
     AggregateRecreateNotAllowed,
 
     /// Replication error (network or follower rejection and s3 is down).
@@ -71,10 +74,12 @@ pub enum ShardWriteError {
 impl ShardWriteError {
     pub fn error_code(&self) -> &'static str {
         match self {
+            Self::MalformedGuardEntry => "malformed_guard_entry",
             Self::EmptyEventsList => "empty_events_list",
             Self::ZeroEventType { .. } => "zero_event_type",
             Self::ClientIdempotencyViolation { .. } => "client_idempotency_violation",
             Self::InflightDuplicateWrite { .. } => "inflight_duplicate_write",
+            Self::ConflictResponseTooLarge { .. } => "conflict_response_too_large",
             Self::OptimisticConcurrencyViolation { .. } => "optimistic_concurrency_violation",
             Self::FailedToSerialiseDatablocks(_) => "serialise_datablocks_failed",
             Self::AggregateNotExists => "aggregate_not_exists",

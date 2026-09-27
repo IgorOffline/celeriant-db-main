@@ -14,3 +14,4 @@ pub mod pending_cache_item;
 
 #[cfg(test)]
 mod tests;
+pub use shard_mem_cache::validation_pins;

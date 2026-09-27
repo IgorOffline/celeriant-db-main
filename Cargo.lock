@@ -512,7 +512,7 @@ dependencies = [
 
 [[package]]
 name = "celeriant"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64",
  "celeriant_crypto",
@@ -541,8 +541,9 @@ dependencies = [
 
 [[package]]
 name = "celeriant_bench"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
+ "bincode",
  "celeriant_client_tokio",
  "celeriant_crypto",
  "celeriant_msg",
@@ -556,9 +557,10 @@ dependencies = [
 
 [[package]]
 name = "celeriant_chaos"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "celeriant_bench",
+ "celeriant_msg",
  "clap",
  "reqwest 0.12.28",
  "serde",
@@ -568,7 +570,7 @@ dependencies = [
 
 [[package]]
 name = "celeriant_cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -594,7 +596,7 @@ dependencies = [
 
 [[package]]
 name = "celeriant_client_glommio"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "celeriant_ktls",
  "celeriant_msg",
@@ -610,7 +612,7 @@ dependencies = [
 
 [[package]]
 name = "celeriant_client_tokio"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "celeriant_client_wire",
  "celeriant_crypto",
@@ -631,7 +633,7 @@ dependencies = [
 
 [[package]]
 name = "celeriant_client_wire"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "celeriant_wal",
  "celeriant_wire",
@@ -640,7 +642,7 @@ dependencies = [
 
 [[package]]
 name = "celeriant_crypto"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64",
  "rand 0.8.5",
@@ -660,7 +662,7 @@ dependencies = [
 
 [[package]]
 name = "celeriant_demo"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "axum",
  "celeriant_client_tokio",
@@ -678,7 +680,7 @@ dependencies = [
 
 [[package]]
 name = "celeriant_disk"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "criterion",
  "futures-lite",
@@ -690,7 +692,7 @@ dependencies = [
 
 [[package]]
 name = "celeriant_distributed"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bincode",
  "blake3",
@@ -704,7 +706,7 @@ dependencies = [
 
 [[package]]
 name = "celeriant_integration_tests"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "apache-avro",
  "base64",
@@ -740,7 +742,7 @@ dependencies = [
 
 [[package]]
 name = "celeriant_ktls"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "futures-lite",
  "glommio",
@@ -754,7 +756,7 @@ dependencies = [
 
 [[package]]
 name = "celeriant_memcache"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "celeriant_distributed",
  "celeriant_rotating_log",
@@ -762,12 +764,13 @@ dependencies = [
  "deepsize",
  "lru 0.16.2",
  "metrics",
+ "rand 0.8.5",
  "tracing",
 ]
 
 [[package]]
 name = "celeriant_msg"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bincode",
  "celeriant_wal",
@@ -779,7 +782,7 @@ dependencies = [
 
 [[package]]
 name = "celeriant_reference"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "axum",
  "celeriant_client_tokio",
@@ -799,7 +802,7 @@ dependencies = [
 
 [[package]]
 name = "celeriant_rotating_log"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bincode",
  "celeriant_disk",
@@ -818,7 +821,7 @@ dependencies = [
 
 [[package]]
 name = "celeriant_runtimes"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -854,7 +857,7 @@ dependencies = [
 
 [[package]]
 name = "celeriant_shard"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "apache-avro",
  "base64",
@@ -891,7 +894,7 @@ dependencies = [
 
 [[package]]
 name = "celeriant_sidecar"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -904,7 +907,7 @@ dependencies = [
 
 [[package]]
 name = "celeriant_wal"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bincode",
  "deepsize",
@@ -917,7 +920,7 @@ dependencies = [
 
 [[package]]
 name = "celeriant_wal_inspect"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "celeriant_wal",
  "celeriant_wire",
@@ -925,7 +928,7 @@ dependencies = [
 
 [[package]]
 name = "celeriant_watch"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "celeriant_msg",
  "celeriant_wal",
@@ -941,7 +944,7 @@ dependencies = [
 
 [[package]]
 name = "celeriant_wire"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bincode",
  "celeriant_wal",
@@ -2300,7 +2303,7 @@ dependencies = [
 
 [[package]]
 name = "kafka_bench"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "rdkafka",
  "tokio",

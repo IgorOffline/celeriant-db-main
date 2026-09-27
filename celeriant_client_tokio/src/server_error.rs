@@ -1,5 +1,6 @@
 use celeriant_msg::error_codes::*;
-use celeriant_msg::response::responses::ErrorResponse;
+pub use celeriant_msg::response::responses::AggregateConflict;
+use celeriant_msg::response::responses::{ErrorResponse, WriteConflictResponse, DeleteConflictResponse};
 
 /// Extract a u64 field from a JSON string best-effort. Returns None on any failure.
 fn parse_u64_field(json: &str, field: &str) -> Option<u64> {
@@ -23,6 +24,8 @@ pub enum ReadError {
 #[derive(Debug)]
 pub enum WriteError {
     EmptyEventsList,
+    MalformedGuardEntry,
+    ConflictResponseCapacityExceeded,
     ZeroEventType,
     ClientIdempotencyViolation {
         last_client_seq: Option<u64>,
@@ -31,6 +34,7 @@ pub enum WriteError {
     OptimisticConcurrencyViolation {
         expected_version: Option<u64>,
         current_aggregate_version: Option<u64>,
+        conflicts: Vec<AggregateConflict>,
     },
     FailedToSerialiseDatablocks,
     AggregateNotExists,
@@ -66,9 +70,11 @@ pub enum SchemaError {
 pub enum DeleteError {
     AggregateNotExists,
     EmptyDeleteList,
+    ConflictResponseCapacityExceeded,
     OptimisticConcurrencyViolation {
         expected_version: Option<u64>,
         current_aggregate_version: Option<u64>,
+        conflicts: Vec<AggregateConflict>,
     },
     CacheError,
     ReplicationError,
@@ -151,19 +157,14 @@ impl From<ErrorResponse> for ServerError {
             READ_FETCH_DATABLOCKS => ServerError::Read { kind: ReadError::FetchDatablocks, error_message: msg },
             READ_FETCH_METABLOCKS => ServerError::Read { kind: ReadError::FetchMetablocks, error_message: msg },
 
+            WRITE_MALFORMED_GUARD_ENTRY => ServerError::Write { kind: WriteError::MalformedGuardEntry, error_message: msg },
+            WRITE_CONFLICT_RESPONSE_TOO_LARGE => ServerError::Write { kind: WriteError::ConflictResponseCapacityExceeded, error_message: msg },
             WRITE_EMPTY_EVENTS_LIST => ServerError::Write { kind: WriteError::EmptyEventsList, error_message: msg },
             WRITE_ZERO_EVENT_TYPE => ServerError::Write { kind: WriteError::ZeroEventType, error_message: msg },
             WRITE_CLIENT_IDEMPOTENCY_VIOLATION => ServerError::Write {
                 kind: WriteError::ClientIdempotencyViolation {
                     last_client_seq: parse_u64_field(&msg, "last_client_seq"),
                     attempted_client_seq: parse_u64_field(&msg, "attempted_client_seq"),
-                },
-                error_message: msg,
-            },
-            WRITE_OPTIMISTIC_CONCURRENCY_VIOLATION => ServerError::Write {
-                kind: WriteError::OptimisticConcurrencyViolation {
-                    expected_version: parse_u64_field(&msg, "expected_version"),
-                    current_aggregate_version: parse_u64_field(&msg, "current_aggregate_version"),
                 },
                 error_message: msg,
             },
@@ -202,14 +203,8 @@ impl From<ErrorResponse> for ServerError {
             TRIM_REPLICATION_BACKPRESSURE => ServerError::Trim { kind: TrimError::ReplicationBackpressure, error_message: msg },
 
             DELETE_AGGREGATE_NOT_EXISTS => ServerError::Delete { kind: DeleteError::AggregateNotExists, error_message: msg },
+            DELETE_CONFLICT_RESPONSE_TOO_LARGE => ServerError::Delete { kind: DeleteError::ConflictResponseCapacityExceeded, error_message: msg },
             DELETE_EMPTY_DELETE_LIST => ServerError::Delete { kind: DeleteError::EmptyDeleteList, error_message: msg },
-            DELETE_OPTIMISTIC_CONCURRENCY_VIOLATION => ServerError::Delete {
-                kind: DeleteError::OptimisticConcurrencyViolation {
-                    expected_version: parse_u64_field(&msg, "expected_version"),
-                    current_aggregate_version: parse_u64_field(&msg, "current_aggregate_version"),
-                },
-                error_message: msg,
-            },
             DELETE_CACHE_ERROR => ServerError::Delete { kind: DeleteError::CacheError, error_message: msg },
             DELETE_REPLICATION_ERROR => ServerError::Delete { kind: DeleteError::ReplicationError, error_message: msg },
             DELETE_FSYNC_ERROR => ServerError::Delete { kind: DeleteError::FsyncError, error_message: msg },
@@ -275,6 +270,8 @@ impl std::fmt::Display for ReadError {
 impl std::fmt::Display for WriteError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            WriteError::MalformedGuardEntry => write!(f, "malformed guard entry"),
+            WriteError::ConflictResponseCapacityExceeded => write!(f, "conflict response capacity exceeded"),
             WriteError::EmptyEventsList => write!(f, "empty events list"),
             WriteError::ZeroEventType => write!(f, "zero event type"),
             WriteError::ClientIdempotencyViolation { .. } => write!(f, "client idempotency violation"),
@@ -313,6 +310,7 @@ impl std::fmt::Display for DeleteError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             DeleteError::AggregateNotExists => write!(f, "aggregate not exists"),
+            DeleteError::ConflictResponseCapacityExceeded => write!(f, "conflict response capacity exceeded"),
             DeleteError::EmptyDeleteList => write!(f, "empty delete list"),
             DeleteError::OptimisticConcurrencyViolation { .. } => write!(f, "optimistic concurrency violation"),
             DeleteError::CacheError => write!(f, "cache error"),
@@ -393,3 +391,31 @@ impl std::fmt::Display for ServerError {
 }
 
 impl std::error::Error for ServerError {}
+
+impl From<WriteConflictResponse> for ServerError {
+    fn from(response: WriteConflictResponse) -> Self {
+        let first = response.conflicts.first();
+        Self::Write {
+            kind: WriteError::OptimisticConcurrencyViolation {
+                expected_version: first.map(|c| c.expected),
+                current_aggregate_version: first.map(|c| c.current),
+                conflicts: response.conflicts,
+            },
+            error_message: "optimistic concurrency violation".into(),
+        }
+    }
+}
+
+impl From<DeleteConflictResponse> for ServerError {
+    fn from(response: DeleteConflictResponse) -> Self {
+        let first = response.conflicts.first();
+        Self::Delete {
+            kind: DeleteError::OptimisticConcurrencyViolation {
+                expected_version: first.map(|c| c.expected),
+                current_aggregate_version: first.map(|c| c.current),
+                conflicts: response.conflicts,
+            },
+            error_message: "optimistic concurrency violation".into(),
+        }
+    }
+}

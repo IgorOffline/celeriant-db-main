@@ -10,7 +10,7 @@
 //! 2. Register schema, verify enforcement
 //! 3. Restart server (cold cache), verify schema recovered from WAL
 //!
-//! Run with: cargo run --bin schema_zero_cache_main -p celeriant_integration_tests --release
+//! Run with: cargo run --release -p celeriant_integration_tests -- --test schema_zero_cache
 
 use std::collections::HashMap;
 use std::sync::Arc;

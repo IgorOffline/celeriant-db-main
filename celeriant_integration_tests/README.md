@@ -20,6 +20,22 @@ cargo run --release -p celeriant_integration_tests -- --test single
 cargo run --release -p celeriant_integration_tests -- --timeout 120
 ```
 
+### Atomic guards and complete conflicts
+
+After building the coordinated 0.3.0 server, run both named contracts:
+
+```sh
+cargo run --release -p celeriant_integration_tests -- --test occ_guards_standalone
+cargo run --release -p celeriant_integration_tests -- --test occ_guards_distributed
+```
+
+The standalone scenario covers guards, complete write/delete conflicts, V4/V5
+frames, rejected legacy requests, concurrent fences, restart readbacks and a
+restrictive response ceiling. The distributed scenario compares complete payloads
+and aggregate metadata on both nodes before and after a dual restart. It requires
+Docker for its isolated MinIO container. These local scenarios complement the four
+guard-bearing Pi scenarios documented in `celeriant_chaos/README.md`.
+
 ## Running on macOS / Windows
 
 Celeriant uses `glommio` + io_uring, which are Linux-only. On macOS and
@@ -102,9 +118,9 @@ cargo run --release -p celeriant_integration_tests -- --list-categories
 | `fencing` | Write rejection on fenced nodes, concurrent CAS |
 | `invariant` | Property checks: event counts, convergence, deduplication, queue pressure |
 | `edge` | Corner cases: cache eviction, WAL divergence, lock contention, corruption detection |
-| `correctness` | Pilot Phase 1: DCB rollback, OCC conflicts, cross-shard rejection, exactly-once, ordering, multi-tenancy |
-| `durability` | Pilot Phase 2: write survival, dual restart, WAL corruption, S3 capacity |
-| `performance` | Pilot Phase 3 + benchmarks: cold reads, bloom filters, throughput |
+| `correctness` | DCB rollback, OCC conflicts, cross-shard rejection, exactly-once, ordering, multi-tenancy |
+| `durability` | Write survival, dual restart, WAL corruption, S3 capacity |
+| `performance` | Cold reads, bloom filters, throughput |
 | `operations` | Rolling upgrade, standalone-to-distributed migration |
 | `security` | mTLS, client identity, API key auth |
 | `schema` | Schema registration, enforcement, failover, crash recovery |

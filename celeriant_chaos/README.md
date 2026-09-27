@@ -162,3 +162,63 @@ make teardown-data                     # destructive: wipes cs1, cs2, MinIO
 ```
 
 Run reports under `deploy/<target>/runs/` are git-ignored and accumulate over time. Prune them when convenient.
+
+## Atomic guard recovery gate
+
+Four explicit scenarios exercise two unchanged fence guards with independent paired
+appends, complete three-key OCC rejections, guard-only observations and a final
+fence advance. They use the verified Pi test namespace only and are excluded from
+`--full`. Run after the coordinated server/Rust protocol upgrade:
+
+```sh
+bash deploy/rpi-cluster/chaos.sh --scenario guard_fence_contention --tasks 8 --duration 30 --seed 24092401
+bash deploy/rpi-cluster/chaos.sh --scenario guard_fence_leader_kill --tasks 8 --duration 90 --seed 24092402
+bash deploy/rpi-cluster/chaos.sh --scenario guard_fence_partition_heal --tasks 8 --duration 90 --seed 24092403
+bash deploy/rpi-cluster/chaos.sh --scenario guard_fence_rollback --tasks 8 --duration 120 --seed 24092404
+```
+
+Workers are restricted to 2–16. Each round submits four requests per worker, then
+waits two seconds; the requested load window is 10–180 seconds for contention and
+70–180 seconds for faults. Recovery polling and full readback extend the total
+scenario duration. Every attempt has fresh targets and event identities; ambiguous
+writes are never replayed.
+
+Each run saves `<scenario>.history.bin`: a versioned bincode history containing all
+request participants, full binary aggregate keys, exact typed conflict vectors,
+and complete paginated payload readbacks from both physical nodes before and after
+a dual restart. The pure `celeriant_bench::guard_fence::check_guard_history` checks
+acknowledged durability, rejected-write absence, ambiguous-pair atomicity, fence
+history, exact conflict attribution, response versions and readback completeness.
+No head-count approximation or sampled subset closes this gate. Read artifacts
+with `guard_fence::read_history`; aggregate keys are not emitted into JSON.
+
+Recheck a saved history against the two required physical nodes:
+
+```sh
+cargo run -p celeriant_bench --example check_guard_history -- path/to/scenario.history.bin --node 192.168.88.214 --node 192.168.88.213 --fault-evidence path/to/scenario-fault.txt
+```
+
+Omit `--fault-evidence` for contention. A failed history check exits unsuccessfully.
+
+Leader failure uses the existing no-restart SIGKILL targets. Partitions affect only
+peer replication port 10001; rollback also blocks the observed leader's outbound
+connection to test S3 at `192.168.88.78:9000`. Cleanup removes those exact rules and
+stops only `celeriant`. Production remains on its separate service/data/ports.
+The sole seed write identifies the workload shard from a fresh metric sample,
+saved as `<scenario>-seed-shard.json`. The rollback verdict requires journal
+evidence of a strict WAL cursor rewind and subsequent speculative-state cull on
+that same shard; deferred-replication counters do not prove it. Leader checks use
+the seeded shard's effective status because a fenced node may retain its raw
+leader role. Zero tolerance for overlapping effective leaders remains in force.
+Without that evidence the scenario is inconclusive and exits unsuccessfully.
+
+Use `make -C deploy/rpi-cluster build` and `ship` with the verified existing test
+units. `deploy` also refreshes shared Promtail configuration; `heal-all` changes
+host clocks. Neither belongs to this isolated gate. Do not use disk-fill, clock
+skew, device setup or production service operations on the shared hosts.
+
+Guard history checker tests: `cargo test -p celeriant_bench --test guard_history_contract`.
+
+These bounded runs establish correctness, not throughput or latency. The generic
+report's latency fields are unpopulated zeros; operation timings remain in the
+binary history for fault-window checks.

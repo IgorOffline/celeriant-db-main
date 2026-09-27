@@ -142,6 +142,15 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 format_key(key), b_batches.len(), 2 * EVENTS_PER_PHASE
             ));
         }
+        for (i, batch) in b_batches.iter().enumerate() {
+            let seq = batch.events[0].client_seq;
+            if seq != i as u64 + 1 {
+                mismatches.push(format!(
+                    "aggregate {}: B batch {} has client_seq {}, expected {}",
+                    format_key(key), i, seq, i + 1
+                ));
+            }
+        }
         if let Err(msg) = diff_aggregate(key, &a_batches, &b_batches, DiffMode::SameRun) {
             mismatches.push(msg);
         }

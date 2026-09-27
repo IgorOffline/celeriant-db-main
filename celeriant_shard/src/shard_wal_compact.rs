@@ -489,7 +489,7 @@ struct DatablockRef {
 /// Build a compacted copy of `target_log_id` into a temp file.
 ///
 /// The temp file is written to `{temp_dir}/log_{target_log_id}.compacting`. The caller
-/// (Phase 3) is responsible for atomically renaming it over the original.
+/// must atomically rename it over the original.
 ///
 /// Returns `(temp_path, compacted_size_bytes, new_tips)`, where `new_tips` maps each
 /// surviving aggregate to its rewritten tip offset so the caller can remap cached positions.

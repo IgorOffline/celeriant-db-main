@@ -6,7 +6,7 @@
 //! Writes are spawned in background tasks so we can read while replication
 //! is still in progress.
 //!
-//! Run with: cargo run --bin leader_read_visibility_main
+//! Run with: cargo run --release -p celeriant_integration_tests -- --test leader_read_visibility
 
 use celeriant_client_tokio::celeriant_client::CeleriantClient;
 use celeriant_client_tokio::list_operations::{ListAggregatesIterator, ListOptions};

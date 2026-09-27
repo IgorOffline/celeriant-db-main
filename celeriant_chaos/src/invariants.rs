@@ -99,6 +99,9 @@ pub struct ScenarioExpectations {
     /// nodes is not exactly 1. Brief split-brain windows are tolerated by
     /// chaos scenarios that exercise leadership change.
     pub max_split_brain_ticks: u64,
+    /// Check effective write authority on this shard instead of raw node role,
+    /// which can remain Leader while its expired lease fences all writes.
+    pub effective_leader_shard: Option<u32>,
     /// Maximum number of role flips on either node during the bench window.
     pub max_role_flips: u64,
 
@@ -184,6 +187,7 @@ impl Default for ScenarioExpectations {
             max_bench_error_ratio: None,
             max_pool_timeout_ratio: None,
             max_split_brain_ticks: 0,
+            effective_leader_shard: None,
             max_role_flips: 0,
             assert_eventual_progress: false,
             require_leader_retained: false,
@@ -324,18 +328,27 @@ pub fn run_all(data: &RunData, expect: &ScenarioExpectations) -> Vec<CheckResult
 fn check_exactly_one_leader(data: &RunData, expect: &ScenarioExpectations) -> CheckResult {
     const NAME: &str = "ExactlyOneLeader";
     let mut bad_ticks = 0u64;
+    let mut observed_ticks = 0u64;
     let mut first_bad: Option<String> = None;
     for (l, f) in data.pairs() {
         if !(l.ok && f.ok) {
             continue;
         }
-        let role_sum = l.node_role + f.node_role;
+        let role_sum = if let Some(shard) = expect.effective_leader_shard {
+            let (Some(left), Some(right)) = (l.effective_status_by_shard.get(&shard), f.effective_status_by_shard.get(&shard)) else {
+                return CheckResult::inconclusive(NAME, format!("missing effective status for shard {shard} at {}ms", l.t_ms));
+            };
+            f64::from(u8::from(*left == 4) + u8::from(*right == 4))
+        } else {
+            l.node_role + f.node_role
+        };
+        observed_ticks += 1;
         if (role_sum - 1.0).abs() > 0.5 {
             bad_ticks += 1;
             if first_bad.is_none() {
                 first_bad = Some(format!(
-                    "first at t_ms={}: leader.role={} follower.role={} (sum={})",
-                    l.t_ms, l.node_role, f.node_role, role_sum
+                    "first at t_ms={}: leader.role={} follower.role={} (checked sum={}, effective shard={:?})",
+                    l.t_ms, l.node_role, f.node_role, role_sum, expect.effective_leader_shard
                 ));
             }
         }
@@ -349,6 +362,12 @@ fn check_exactly_one_leader(data: &RunData, expect: &ScenarioExpectations) -> Ch
                 first_bad.unwrap_or_else(|| "no detail".into())
             ),
         )
+    } else if let Some(shard) = expect.effective_leader_shard {
+        if observed_ticks == 0 {
+            CheckResult::inconclusive(NAME, "no readable paired effective-status samples")
+        } else {
+            CheckResult::pass_with_detail(NAME, format!("exactly one effective leader on guarded shard {shard} across {observed_ticks} paired ticks"))
+        }
     } else {
         CheckResult::pass(NAME)
     }
@@ -592,7 +611,7 @@ fn heartbeat_budget(data: &RunData, expect: &ScenarioExpectations) -> u64 {
 /// on both hosts must either (a) have equal wal_seq on both sides, or (b) have
 /// the lower side strictly advancing in the final `PROGRESS_WINDOW_MS`.
 ///
-/// The per-shard check catches the Phase 8a failure mode: one shard permanently
+/// The per-shard check catches one shard permanently
 /// forked while other shards pushed both nodes' node-level max to the same
 /// value, masking the stuck shard in the old per-node-max comparison.
 ///
@@ -1287,6 +1306,32 @@ mod tests {
     // --- check_counter presence-guard tests (A4) ---
 
     #[test]
+    fn guarded_shard_leadership_uses_effective_authority_and_requires_evidence() {
+        let expect = ScenarioExpectations { effective_leader_shard: Some(2), ..Default::default() };
+        for (old_status, new_status, expected) in [
+            (Some(5), Some(4), CheckOutcome::Pass),
+            (Some(4), Some(4), CheckOutcome::Fail),
+            (Some(5), Some(5), CheckOutcome::Fail),
+            (None, Some(4), CheckOutcome::Inconclusive),
+            (Some(5), None, CheckOutcome::Inconclusive),
+        ] {
+            let mut old = sample(LEADER, 39002, &[(2, 99)]);
+            let mut new = sample(FOLLOWER, 39002, &[(2, 91)]);
+            old.node_role = 1.0;
+            new.node_role = 1.0;
+            old.effective_status_by_shard.insert(7, 4);
+            new.effective_status_by_shard.insert(7, 5);
+            if let Some(status) = old_status { old.effective_status_by_shard.insert(2, status); }
+            if let Some(status) = new_status { new.effective_status_by_shard.insert(2, status); }
+            let samples = [old, new];
+            let data = run_data(&samples);
+            let result = check_exactly_one_leader(&data, &expect);
+            assert_eq!(result.outcome, expected, "statuses {old_status:?}/{new_status:?}: {result:?}");
+            assert!(check_exactly_one_leader(&data, &ScenarioExpectations::default()).failed());
+        }
+    }
+
+    #[test]
     fn check_counter_fails_closed_when_allowlisted_metric_never_exported() {
         // metric_keys_present empty on every sample: an allowlisted metric
         // (eagerly registered at startup on both nodes) going absent means
@@ -1355,14 +1400,14 @@ mod tests {
         assert!(r.detail.contains("delta 3"), "{}", r.detail);
     }
 
-    /// Phase 8a failure mode: one shard (shard_3) permanently forked and frozen,
+    /// Regression: one shard (shard_3) permanently forked and frozen,
     /// but other shards pushed both nodes' node-level wal_seq_max to the same value.
     /// The OLD per-node-max check would have PASSED (wal_seq_max equal on both hosts).
     /// The NEW per-shard check must FAIL, naming shard_3.
     #[test]
     fn forked_shard_masked_by_node_max_fails() {
         // Both hosts have wal_seq_max == 238594 from shards 1+2.
-        // shard_3: leader=130832, follower=131189 (follower AHEAD — the Phase 8a shape).
+        // shard_3: leader=130832, follower=131189 (follower ahead).
         // Neither is advancing (both frozen in the progress window).
         let samples = vec![
             // t=0: first sample establishing shard values

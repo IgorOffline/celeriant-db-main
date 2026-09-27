@@ -172,9 +172,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-// TEMP DIAGNOSTIC (perf regression investigation, session/progress.md): scrape the
-// leader's confirm-loop iteration histogram to see the retry shape under real load.
-// Remove once the investigation concludes.
+// The confirm-loop histogram distinguishes replication retries from storage latency.
 async fn print_confirm_loop_metrics(metrics_port: u16) {
     let url = format!("http://127.0.0.1:{}/metrics", metrics_port);
     let client = match reqwest::Client::builder().timeout(Duration::from_secs(2)).build() {

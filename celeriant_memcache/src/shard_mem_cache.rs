@@ -1,3 +1,6 @@
+pub mod validation_pins;
+
+use validation_pins::pinned_lru::PinnedLru;
 use crate::cache_path::CachePath;
 use crate::cached_schema::{CachedSchema, Validate};
 use crate::mem_snapshot_aggregate::AggregateStatus;
@@ -63,16 +66,16 @@ pub struct ShardMemCache<V: Validate> {
 
     /// LRU cache of aggregate positions committed to file (batch and event sequences)
     /// Updated after fsync - used by write path (OCC, idempotency)
-    aggregate_write_snapshots: LruCache<AggregateKey, MemSnapshotAggregate, PrecomputedBuildHasher>,
+    aggregate_write_snapshots: PinnedLru<AggregateKey, MemSnapshotAggregate>,
 
     /// LRU cache of aggregate positions visible to readers
     /// Updated after replication - used by read path
-    aggregate_read_snapshots: LruCache<AggregateKey, MemSnapshotAggregate, PrecomputedBuildHasher>,
+    aggregate_read_snapshots: PinnedLru<AggregateKey, MemSnapshotAggregate>,
 
     /// LRU cache of client event sequences committed to file
     /// Missing here does not mean client hasn't written to aggregate, just not in cache
     /// Stores (client_seq, wal_seq). wal_seq=0 means loaded from disk (always durable).
-    aggregate_write_client_snapshots: LruCache<AggregateClientKey, (u64, u64), PrecomputedBuildHasher>,
+    aggregate_write_client_snapshots: PinnedLru<AggregateClientKey, (u64, u64)>,
 
     /// Indexes representing the in-memory positions of the next write for each aggregate
     /// These are writes yet to be written to disk
@@ -84,11 +87,11 @@ pub struct ShardMemCache<V: Validate> {
     pending_append_queue: Vec<ShardLogQueueItem>,
 
     /// LRU cache of compiled schemas (Validated/CompilationFailed only).
-    schema_cache: LruCache<SchemaKey, CachedSchema<V>, PrecomputedBuildHasher>,
+    schema_cache: PinnedLru<SchemaKey, CachedSchema<V>>,
 
     /// LRU cache of keys confirmed to have no schema in WAL.
     /// Separated from schema_cache so large validators can't evict these tiny entries.
-    no_schema_cache: LruCache<SchemaKey, (), PrecomputedBuildHasher>,
+    no_schema_cache: PinnedLru<SchemaKey, ()>,
 
     /// Pending schema registrations not yet fsynced (D4)
     /// Checked alongside schema_cache to prevent concurrent duplicate registrations.
@@ -137,6 +140,10 @@ pub struct ShardMemCache<V: Validate> {
 
     /// Monotonically increasing counter bumped on every fsync or replication rollback
     rollback_generation: u64,
+
+    /// Bumped on every compaction remap: a load reading the replaced file
+    /// would cache pre-compaction offsets
+    remap_generation: u64,
 
     /// Running segment summary: per-aggregate stats accumulated since last rotation
     segment_summary: HashMap<AggregateKey, SegmentAggregateEntry>,
@@ -259,7 +266,22 @@ impl SealedSegmentSummary {
     }
 }
 
+/// Opaque: compare two readings of [`ShardMemCache::load_epoch`] for equality.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LoadEpoch(u64);
+
 impl<V: Validate> ShardMemCache<V> {
+    fn validation_keys_loaded(&mut self, aggregates: &[AggregateKey], clients: &[AggregateClientKey], schemas: &[SchemaKey]) -> bool {
+        aggregates.iter().all(|key| self.aggregate_load_status(key, CachePath::Write).0)
+            && clients.iter().all(|key| self.aggregate_client_load_status(&key.aggregate_key, key).0)
+            && schemas.iter().all(|key| self.schema_cache_is_loaded(key))
+    }
+
+    pub fn schema_cache_is_loaded(&self, key: &SchemaKey) -> bool {
+        matches!(self.schema_cache.peek(key), Some(CachedSchema::Validated(_) | CachedSchema::CompilationFailed(_)))
+            || self.no_schema_cache.contains(key)
+    }
+
     /// Returns (is_loaded, last_client_seq)
     /// - is_loaded: true if we've already checked disk for this aggregate+client
     /// - last_client_seq: Some(idx) if client has written, None if not found
@@ -654,16 +676,32 @@ impl<V: Validate> ShardMemCache<V> {
         self.rollback_generation
     }
 
+    /// Changes on every rollback, every compaction remap and every clear of a
+    /// cache that disk loads fill. A load or validation attempt that sees it
+    /// change must discard its results and start over: the disk state it read
+    /// may no longer exist.
+    pub fn load_epoch(&self) -> LoadEpoch {
+        LoadEpoch(
+            self.rollback_generation
+                .wrapping_add(self.remap_generation)
+                .wrapping_add(self.aggregate_write_snapshots.epoch())
+                .wrapping_add(self.aggregate_read_snapshots.epoch())
+                .wrapping_add(self.aggregate_write_client_snapshots.epoch())
+                .wrapping_add(self.schema_cache.epoch())
+                .wrapping_add(self.no_schema_cache.epoch()),
+        )
+    }
+
     pub fn is_aggregate_snapshot_cache_full(&self, cache_path: CachePath) -> bool {
         let cache = match cache_path {
             CachePath::Read => &self.aggregate_read_snapshots,
             CachePath::Write => &self.aggregate_write_snapshots,
         };
-        cache.len() == cache.cap().get()
+        cache.len() >= cache.cap().get()
     }
 
     pub fn is_aggregate_client_cache_full(&self) -> bool {
-        self.aggregate_write_client_snapshots.len() == self.aggregate_write_client_snapshots.cap().get()
+        self.aggregate_write_client_snapshots.len() >= self.aggregate_write_client_snapshots.cap().get()
     }
 
     pub fn aggregate_write_client_snapshots_len(&self) -> usize {
@@ -679,14 +717,14 @@ impl<V: Validate> ShardMemCache<V> {
             CachePath::Read => &self.aggregate_read_snapshots,
             CachePath::Write => &self.aggregate_write_snapshots,
         };
-        if cache.len() == cache.cap().get() {
+        if cache.len() >= cache.cap().get() {
             return true;
         }
         cache.contains(&aggregate_key)
     }
 
     pub fn is_aggregate_client_cache_full_or_contains(&self, aggregate_client_key: &AggregateClientKey) -> bool {
-        if self.aggregate_write_client_snapshots.len() == self.aggregate_write_client_snapshots.cap().get() {
+        if self.aggregate_write_client_snapshots.len() >= self.aggregate_write_client_snapshots.cap().get() {
             return true;
         }
         self.aggregate_write_client_snapshots.contains(&aggregate_client_key)
@@ -984,7 +1022,9 @@ impl<V: Validate> ShardMemCache<V> {
     /// Repoint cached metablock positions after `target_log_id` was compacted in place.
     /// Remaps each tip to its new offset, or evicts the entry if the block was dropped.
     /// Call synchronously right after the atomic swap (no await in between).
+    /// Changes the load epoch: an in-flight scan still reads the old file.
     pub fn remap_compacted_positions(&mut self, target_log_id: u64, new_tips: &HashMap<AggregateKey, u64>) {
+        self.remap_generation = self.remap_generation.wrapping_add(1);
         Self::remap_snapshot_lru(&mut self.aggregate_read_snapshots, target_log_id, new_tips);
         Self::remap_snapshot_lru(&mut self.aggregate_write_snapshots, target_log_id, new_tips);
 
@@ -1003,7 +1043,7 @@ impl<V: Validate> ShardMemCache<V> {
     }
 
     fn remap_snapshot_lru(
-        cache: &mut LruCache<AggregateKey, MemSnapshotAggregate, PrecomputedBuildHasher>,
+        cache: &mut PinnedLru<AggregateKey, MemSnapshotAggregate>,
         target_log_id: u64,
         new_tips: &HashMap<AggregateKey, u64>,
     ) {
@@ -1101,7 +1141,7 @@ impl<V: Validate> ShardMemCache<V> {
     }
 
     pub fn is_schema_cache_full(&self) -> bool {
-        self.schema_cache.len() == self.schema_cache.cap().get()
+        self.schema_cache.len() >= self.schema_cache.cap().get()
     }
 
     /// Check if a schema registration is pending fsync (D4)
@@ -1330,11 +1370,11 @@ impl<V: Validate> ShardMemCache<V> {
             cache_eviction_queue: VecDeque::new(),
             aggregate_queue_positions: PrecomputedMap::default(),
             pending_append_queue: vec![],
-            aggregate_write_snapshots: LruCache::with_hasher(aggregate_cap, PrecomputedBuildHasher::default()),
-            aggregate_read_snapshots: LruCache::with_hasher(aggregate_cap, PrecomputedBuildHasher::default()),
-            aggregate_write_client_snapshots: LruCache::with_hasher(client_cap, PrecomputedBuildHasher::default()),
-            schema_cache: LruCache::with_hasher(schema_cap, PrecomputedBuildHasher::default()),
-            no_schema_cache: LruCache::with_hasher(no_schema_cap, PrecomputedBuildHasher::default()),
+            aggregate_write_snapshots: PinnedLru::new(aggregate_cap),
+            aggregate_read_snapshots: PinnedLru::new(aggregate_cap),
+            aggregate_write_client_snapshots: PinnedLru::new(client_cap),
+            schema_cache: PinnedLru::new(schema_cap),
+            no_schema_cache: PinnedLru::new(no_schema_cap),
             pending_schema_registrations: PrecomputedSet::default(),
             pending_replication_batches: Vec::new(),
             pending_replication_bytes: 0,
@@ -1345,6 +1385,7 @@ impl<V: Validate> ShardMemCache<V> {
             fsync_rollback_occurred: false,
             replication_rollback_occurred: false,
             rollback_generation: 0,
+            remap_generation: 0,
             segment_summary: HashMap::new(),
             segment_summary_orgs: HashSet::new(),
             segment_summary_types: HashSet::new(),
@@ -1928,10 +1969,9 @@ fn fold_segment_summary(
 /// Inserts into the cache. If `low_priority` is true, only inserts when there's
 /// spare capacity and immediately demotes the entry to LRU position.
 /// Will not change the position if the low priority key already is in the lru
-fn put_with_priority<K, V, S>(cache: &mut LruCache<K, V, S>, key: K, value: V, low_priority: bool)
+fn put_with_priority<K, V>(cache: &mut PinnedLru<K, V>, key: K, value: V, low_priority: bool)
 where
     K: Hash + Eq + Clone,
-    S: std::hash::BuildHasher,
 {
     if low_priority {
         if cache.contains(&key) {

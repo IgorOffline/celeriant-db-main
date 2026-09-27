@@ -9,7 +9,7 @@
 //! has the same TTL, so we wait long enough for it to go stale and for the system to
 //! be running purely on heartbeat-refreshed TTLs before killing the leader.
 //!
-//! Run with: cargo run --bin s3_failover_latency_main -p celeriant_integration_tests --release
+//! Run with: cargo run --release -p celeriant_integration_tests -- --test s3_failover_latency
 
 use celeriant_client_tokio::celeriant_client::CeleriantClient;
 use crate::{

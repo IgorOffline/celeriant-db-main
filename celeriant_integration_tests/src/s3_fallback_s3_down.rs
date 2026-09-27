@@ -11,7 +11,7 @@
 //! 5. Write event 4 to leader. Follower down, S3 unreachable — fallback fails
 //! 6. Verify the write is rejected — client receives error
 //!
-//! Run with: cargo run --bin s3_fallback_s3_down_main
+//! Run with: cargo run --release -p celeriant_integration_tests -- --test s3_fallback_s3_down
 
 use celeriant_client_tokio::celeriant_client::CeleriantClient;
 use crate::{poll_converged_count, s3_cluster_config, write_event, MinioContainer, TestServer, FOLLOWER_CONVERGENCE_TIMEOUT};

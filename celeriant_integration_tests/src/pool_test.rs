@@ -3,7 +3,7 @@
 //! Tests CeleriantPool basic operations, connection lifecycle, idle eviction,
 //! pool configuration, and list operations against a standalone server.
 //!
-//! Run with: cargo run --bin pool_test_main
+//! Run with: cargo run --release -p celeriant_integration_tests -- --test pool_test
 
 use std::collections::HashMap;
 use std::sync::Arc;

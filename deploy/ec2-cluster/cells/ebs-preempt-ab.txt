@@ -1,6 +1,6 @@
 # Does the glommio preempt quantum cause the gp3 decline?
 #
-# Mechanism (session/goal.md, and ~/sandbox/glommio-celeriant-fixes/session/design-need-preempt.md):
+# Mechanism:
 # Reactor::need_preempt reads the LATENCY ring's CQ head/tail only. A main-ring completion cannot
 # set it. The indirect path arms with min_events = ring_depth() = 128 and re-submits every reactor
 # pass, so at low queue depth it never fires. Submission is not late; NOTIFICATION is. A finished

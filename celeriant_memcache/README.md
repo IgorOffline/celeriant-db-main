@@ -73,6 +73,9 @@ Read Path:
 | `CachedSchema<V>` | `Validated(CachedValidator<V>)` or `CompilationFailed(String)` |
 | `CachedValidator<V>` | Wraps an `Rc<V>` validator with size estimate |
 | `UniqueSchemaKeys` | Small-vec optimized set of schema keys (inline up to 2, then Vec) |
+| `ValidationPins` | Request-owned reservations for live aggregate, client and schema validation state |
+
+To step through `PinnedLru`, the store behind `ValidationPins`, open [pinned-lru-simulator.html](pinned-lru-simulator.html) locally in a browser.
 
 ## Invariants
 
@@ -83,6 +86,8 @@ Read Path:
 - Replication rollback is a superset of fsync rollback: it also wipes write snapshots because those positions are not yet visible to readers.
 - Low-priority LRU inserts (scan-driven) only populate spare capacity and immediately demote to LRU tail. Scans must not evict hot entries.
 - `aggregate_queue_positions` and `pending_append_queue` are intentionally unbounded (transient in-flight state that drains every fsync cycle).
+- Write/delete validation reserves its participating cache keys before asynchronous loading and releases them after synchronous enqueue, or when the request fails or is cancelled. Overlapping requests share live values. Ordinary LRU capacity still bounds unreserved entries; reservations add the union of keys in active requests, so memory also depends on admitted request concurrency.
+- An unloaded reservation is distinct from a loaded absent aggregate or absent schema. Final validation requires loaded state. Rollback clears reserved values without releasing their owners. Loads and validation attempts restart whenever `load_epoch` changes, which every rollback, every compaction remap and every clear of a load-filled cache causes; a value loaded across a clear may describe culled disk state. A load scan that bloom-skips a newer segment caches only its searched key. Disk loads must not overwrite newer resident state.
 
 ## Design Decisions
 

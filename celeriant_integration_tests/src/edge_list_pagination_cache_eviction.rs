@@ -30,7 +30,7 @@
 //!
 //! This is test #10 in the integration test coverage report.
 //!
-//! Run with: cargo run --bin edge_list_pagination_cache_eviction_main
+//! Run with: cargo run --release -p celeriant_integration_tests -- --test edge_list_pagination_cache_eviction
 
 use celeriant_client_tokio::celeriant_client::CeleriantClient;
 use crate::{write_event, write_large_event, ServerConfig, TestServer};

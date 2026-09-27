@@ -3,7 +3,7 @@
 //! Tests the watch API functionality with a self-managed server instance.
 //! Creates a temporary data directory and spawns the server automatically.
 //!
-//! Run with: cargo run --bin watch_test_main
+//! Run with: cargo run --release -p celeriant_integration_tests -- --test watch_test
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -15,18 +15,22 @@ use celeriant_client_tokio::celeriant_client::CeleriantClient;
 use celeriant_msg::{
     process_client_requests::ClientRequest,
     process_client_responses::ClientResponse,
-    request::requests::{SingleAggregateWrite, WatchRequest, WriteRequest},
+    request::requests::{
+        DeleteRequest, SingleAggregateDelete, SingleAggregateWrite, WatchRequest, WriteRequest,
+    },
 };
 use celeriant_wal::{
     aggregate_key::AggregateKey,
     datablocks::datablock_aggregate_event::DatablockAggregateEvent,
 };
-use celeriant_wire::network::wire_header::PROTOCOL_VERSION_V2;
+use celeriant_wire::network::wire_header::PROTOCOL_VERSION_V4;
 use tokio::net::TcpStream;
 use tokio::time::{sleep, timeout};
 use tokio_util::compat::TokioAsyncReadCompatExt;
 
 const CLIENT_ID: u128 = 12345;
+/// `AggregateWatchEvent::DELETE` in celeriant_watch.
+const WATCH_OPERATION_DELETE: u8 = 0;
 
 
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -63,7 +67,19 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Test 3: Watch with aggregate filter
+    // Test 3: Watch receives delete events
+    match test_watch_receives_delete(server.address()).await {
+        Ok(()) => {
+            println!("[PASS] test_watch_receives_delete");
+            passed += 1;
+        }
+        Err(e) => {
+            println!("[FAIL] test_watch_receives_delete: {}", e);
+            failed += 1;
+        }
+    }
+
+    // Test 4: Watch with aggregate filter
     match test_watch_with_aggregate_filter(server.address()).await {
         Ok(()) => {
             println!("[PASS] test_watch_with_aggregate_filter");
@@ -75,7 +91,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Test 4: Watch heartbeat
+    // Test 5: Watch heartbeat
     match test_watch_heartbeat(server.address()).await {
         Ok(()) => {
             println!("[PASS] test_watch_heartbeat");
@@ -87,7 +103,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Test 5: Multiple concurrent watchers
+    // Test 6: Multiple concurrent watchers
     match test_multiple_watchers(server.address()).await {
         Ok(()) => {
             println!("[PASS] test_multiple_watchers");
@@ -99,7 +115,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Test 6: Write then watch on same connection (pipelining)
+    // Test 7: Write then watch on same connection (pipelining)
     match test_write_then_watch_same_connection(server.address()).await {
         Ok(()) => {
             println!("[PASS] test_write_then_watch_same_connection");
@@ -111,7 +127,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Test 7: Dial completes promptly (immediate ACK, not the 5s heartbeat)
+    // Test 8: Dial completes promptly (immediate ACK, not the 5s heartbeat)
     match test_watch_dial_is_prompt(server.address()).await {
         Ok(()) => {
             println!("[PASS] test_watch_dial_is_prompt");
@@ -123,7 +139,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Test 8: Server detects client disconnect promptly (no CLOSE-WAIT leak)
+    // Test 9: Server detects client disconnect promptly (no CLOSE-WAIT leak)
     match test_watch_disconnect_detected_promptly(&server).await {
         Ok(()) => {
             println!("[PASS] test_watch_disconnect_detected_promptly");
@@ -167,7 +183,7 @@ impl WatchConnection {
             &mut self.stream,
             &req,
             10_000_000,
-            PROTOCOL_VERSION_V2,
+            PROTOCOL_VERSION_V4,
         )
         .await
         .map_err(|e| format!("Wire error: {:?}", e))?;
@@ -183,7 +199,7 @@ impl WatchConnection {
             &mut self.stream,
             &req,
             10_000_000,
-            PROTOCOL_VERSION_V2,
+            PROTOCOL_VERSION_V4,
         )
         .await
         .map_err(|e| format!("Wire error: {:?}", e))?;
@@ -316,7 +332,7 @@ async fn test_watch_receives_writes(
         {
             Some(ClientResponse::Watch(watch_response)) => {
                 println!("  Watch response: {:?}", watch_response);
-                if watch_response.events.iter().any(|e| e.org_id == aggregate.org_id && e.aggregate_type_id == aggregate.aggregate_type_id && e.aggregate_id == aggregate.aggregate_id) {
+                if watch_response.events.iter().any(|e| e.org_id == aggregate.org_id && e.aggregate_type_id == aggregate.aggregate_type_id && e.aggregate_id == aggregate.aggregate_id && e.to_aggregate_version == Some(1)) {
                     received_write_event = true;
                     println!("  Received write event for aggregate!");
                     break;
@@ -334,6 +350,65 @@ async fn test_watch_receives_writes(
     }
 
     Ok(())
+}
+
+/// Test that watch reports a delete as the delete operation
+async fn test_watch_receives_delete(
+    address: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let aggregate_id = 2500u128;
+    let aggregate = AggregateKey::new(1, 1, aggregate_id);
+
+    let mut write_client = CeleriantClient::connect(address).await?;
+    write_client
+        .write_events(aggregate.clone(), vec![create_event(0, "Delete test event".to_string())], CLIENT_ID)
+        .await?;
+
+    let mut watch = WatchConnection::connect(address).await?;
+    let watch_request = WatchRequest {
+        correlation_id: Some(9),
+        requested_latency_ms: Some(100),
+        shard_id: None,
+        orgs: None,
+        aggregate_types: None,
+        aggregates: Some(HashSet::from([aggregate_id])),
+        operation_types: None,
+    };
+    watch.send_watch_request(&watch_request).await?;
+    sleep(Duration::from_millis(50)).await;
+
+    let mut deletes = HashMap::new();
+    deletes.insert(
+        aggregate.clone(),
+        SingleAggregateDelete {
+            allow_recreate: false,
+            allow_sequence_continuation: false,
+            expected_version: None,
+        },
+    );
+    write_client
+        .delete(DeleteRequest { correlation_id: Some(900), client_id: CLIENT_ID, user_id: None, deletes })
+        .await?;
+
+    for _ in 0..10 {
+        match watch
+            .read_response_timeout(Duration::from_millis(200))
+            .await?
+        {
+            Some(ClientResponse::Watch(watch_response)) => {
+                println!("  Watch response: {:?}", watch_response);
+                if watch_response.events.iter().any(|e| e.aggregate_id == aggregate_id && e.operation == WATCH_OPERATION_DELETE) {
+                    return Ok(());
+                }
+            }
+            Some(ClientResponse::GenericError(err)) => {
+                return Err(format!("Watch error: {}", err.error_message).into());
+            }
+            _ => continue,
+        }
+    }
+
+    Err("Did not receive delete event on watch".into())
 }
 
 /// Test watch with aggregate filter

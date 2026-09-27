@@ -3,7 +3,7 @@
 //! Tests connection lifecycle, pipelining, and shard routing behavior.
 //! Creates a temporary data directory and spawns the server automatically with 4 shards.
 //!
-//! Run with: cargo run --bin connection_test_main
+//! Run with: cargo run --release -p celeriant_integration_tests -- --test connection_test
 
 use std::collections::HashMap;
 use std::sync::Arc;

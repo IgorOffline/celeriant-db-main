@@ -6,8 +6,8 @@ Rules the system enforces. Breaking any of these is a bug. Provide this to LLMs 
 
 ## Durability
 
-- Client ACK is withheld until local `fdatasync()` succeeds AND replication succeeds (TCP or S3 fallback). Both must complete before the response is sent.
-- A delete/trim ACK implies the SoftDelete/SoftTrim tombstone is durable on two storage systems — same contract as the write ACK. Delete and trim snapshot `rollback_generation` before enqueue and re-check it after each durability wait; a rollback crossing either wait surfaces as `RollbackInProgress`, never a silent false ack. False acks are least recoverable here: there is no client_seq idempotency on deletes, so a client can't distinguish "my delete was lost" from "someone else wrote".
+- Client ACK is withheld until local `fdatasync()` succeeds. In replicated mode, replication must also succeed through TCP or S3 fallback before the response is sent. Standalone mode provides local durability only.
+- A delete/trim ACK follows the same durability contract as a write ACK: local storage in standalone mode, and two storage systems in replicated mode. Delete and trim snapshot `rollback_generation` before enqueue and re-check it after each durability wait; a rollback crossing either wait surfaces as `RollbackInProgress`, never a silent false ack. False acks are least recoverable here: there is no client_seq idempotency on deletes, so a client can't distinguish "my delete was lost" from "someone else wrote".
 - All I/O uses Direct I/O (`O_DIRECT` via glommio `DmaFile`). The OS page cache is never used for WAL files.
 - Disk write order within a single fsync: datablocks first (so offsets are known), then metablocks (referencing those offsets), then dual headers, then `fdatasync()`.
 - Both the primary header (offset 0) and backup header (offset `file_len - 512KB`) are written on every fsync. If the primary is corrupt on open, the backup is used.
@@ -37,12 +37,16 @@ Rules the system enforces. Breaking any of these is a bug. Provide this to LLMs 
 
 ## Optimistic Concurrency and Idempotency
 
-- OCC validation runs before client idempotency checks. A concurrent writer with a stale read receives `OccConflict`, not `ClientIdempotencyViolation`.
+- Within each entry, OCC validation runs before client idempotency checks. A mismatch skips that entry's later checks; a non-OCC rejection in another entry can still take precedence over the complete OCC list.
 - OCC checks use the write-ahead snapshot (not the read snapshot). A concurrent write that has been fsynced but not yet replicated still triggers an OCC conflict.
 - Client idempotency checks use write-ahead state. A duplicate write is rejected even if the original is not yet visible to readers.
 - A write is rejected with `ClientIdempotencyViolation` if any event's `client_seq <= max stored client_seq` for that `(aggregate_key, client_id)`.
 - No two batches of one aggregate incarnation ever share an `aggregate_version` OR `event_seq`, including across delete/recreate with sequence continuation. A tombstone recording regressed indexes would make the continuation recreate re-issue already-acked versions — WAL corruption.
-- Multi-aggregate delete validates in two phases mirroring the write path: an async warm loop (existence + cache loads, the only awaits), then one synchronous pass that re-checks OCC and `pending_delete_or_deleted` and rebuilds tombstone fields from current indexes immediately before enqueue. Validation done across await points is stale by construction.
+- Write and delete requests reserve aggregate, client-idempotency and schema cache keys while loading. The final decision requires current loaded state; eviction never means absence. Rollback invalidates loaded values and restarts loading. Reservations share live updates and are released on enqueue, rejection or cancellation.
+- Final write/delete validation and enqueue do not yield. OCC rejection reports every mismatched request key from that decision, sorted by the unsigned numeric key tuple. Any rejection discards all prepared mutations. The one request-wide visibility retry reloads and reruns the entire decision without merging conflict sets.
+- A write entry with no events and a version pin is a guard; creation and client-idempotency flags must be false. A genuinely missing key passes only at zero. Deleted or pending-deleted keys always reject guards. Guards compare the head after trim, create no storage/replication/watch entry, and do not increment versions.
+- A guard-only success performs the existing durability waits and rollback checks, returns no aggregate version, and establishes a conditional observation only. The guard can change after the decision. Lost responses and delete/recreate version reuse retain their existing semantics.
+- `celeriant_guard_entries_total` counts guards accepted for submission by the final decision once per request, including when a subsequent durability wait fails. It is not a commit counter.
 
 ## Leader Election
 
@@ -189,13 +193,14 @@ Rules the system enforces. Breaking any of these is a bug. Provide this to LLMs 
 
 ## Wire Format
 
-- Two protocol versions: V2 (bincode, fixed-int, little-endian) and V3 (MessagePack). V0, V1, V4+ are rejected with `UnsupportedProtocol`.
+- Protocol versions are V4 (bincode, fixed-int, little-endian) and V5 (MessagePack). Every other version is rejected before execution. Internode traffic uses V4. See [client protocol](client-protocol.md) for frozen assignments.
 - Every message has a 17-byte frame header: `[version u32 LE] [message_type u32 LE] [compressed_length u32 LE] [uncompressed_length u32 LE] [compression_type u8]`.
 - Both `compressed_length` and `uncompressed_length` are validated against `max_size_bytes` before any allocation or decompression. Prevents decompression bombs.
 - Default max request: 16 MiB. Default max response: 64 MiB.
 - Protocol version is set on the first message (Identify or first ClientRequest). All subsequent messages use that version. No renegotiation.
-- Compression types: None (0), Zstd (1), Snappy (2), Brotli (3), Gzip (4).
-- Messages that fit in a fixed-size buffer (header + body <= 1024 bytes, no compression) must be stack-allocated. Heap allocation for small messages is prohibited.
+- Compression types: None (0) and dictionary Zstd (1).
+- Conflict response types 13/14 carry binary keys in nonempty sorted lists, without a JSON error envelope. Write/delete admission reserves `25 + 74*N` uncompressed body bytes with checked arithmetic for N pinned entries, even if every pin would succeed. Server response and client receive ceilings are independent.
+- Conflict responses use the variable writer and fall back to uncompressed when compression exceeds the response limit. Small bodies use short uncompressed frames. Fixed-size response variants use a stack buffer; its 1007-byte body capacity is not padding sent on the wire.
 - TCP_NODELAY is always set. Nagle buffering is never permitted.
 
 ## TLS and Security

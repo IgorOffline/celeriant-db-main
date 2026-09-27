@@ -186,6 +186,7 @@ const _: () = {
                     WriteError::OptimisticConcurrencyViolation {
                         expected_version,
                         current_aggregate_version,
+                        ..
                     },
                 ..
             })) => {
@@ -193,6 +194,17 @@ const _: () = {
             }
             _ => {}
         }
+    }
+
+    async fn guarded_write(pool: &CeleriantPool) -> Result<(), ClientError> {
+        let order_key = AggregateKey::new(1, 2, 3);
+        let inventory_key = AggregateKey::new(1, 4, 3);
+        let order_placed_event = json_event(1, &order(123)).unwrap();
+        pool.write_batch(42)
+            .append(order_key, vec![order_placed_event])
+            .guard(inventory_key, 1)
+            .send().await?;
+        Ok(())
     }
 
     // --- Dynamic consistency boundaries ---
@@ -475,6 +487,7 @@ const _: () = {
                     WriteError::OptimisticConcurrencyViolation {
                         expected_version,
                         current_aggregate_version,
+                        ..
                     },
                 ..
             })) => { /* OCC conflict - retry with fresh state */ }

@@ -7,7 +7,7 @@ use celeriant_msg::process_client_requests::ClientRequest;
 use celeriant_msg::request::read_filters::ReadFilters;
 use celeriant_msg::request::requests::ReadRequest;
 use celeriant_wal::aggregate_key::AggregateKey;
-use celeriant_wire::network::wire_header::{PROTOCOL_VERSION_V2, PROTOCOL_VERSION_V3};
+use celeriant_wire::network::wire_header::{PROTOCOL_VERSION_V4, PROTOCOL_VERSION_V5};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::{Duration, timeout};
@@ -64,30 +64,30 @@ pub async fn pinned_per_connection() -> R {
     let server =
         TestServer::start_with_config(port_for("invariant_protocol_version"), config).await?;
 
-    // Control: V3 as a connection's FIRST message is served. Proves a later
-    // rejection is about the mid-connection switch, not about V3 itself.
+    // Control: V5 as a connection's FIRST message is served. Proves a later
+    // rejection is about the mid-connection switch, not about V5 itself.
     let mut control = TcpStream::connect(server.address()).await?;
-    control.write_all(&serialize_read(PROTOCOL_VERSION_V3, 1).await?).await?;
+    control.write_all(&serialize_read(PROTOCOL_VERSION_V5, 1).await?).await?;
     match read_frame(&mut control).await? {
-        Some(v) if v == PROTOCOL_VERSION_V3 => {}
-        Some(v) => return Err(format!("control: V3 first frame answered at version {v}").into()),
-        None => return Err("control: connection closed on a V3 first frame".into()),
+        Some(v) if v == PROTOCOL_VERSION_V5 => {}
+        Some(v) => return Err(format!("control: V5 first frame answered at version {v}").into()),
+        None => return Err("control: connection closed on a V5 first frame".into()),
     }
 
-    // The invariant: a connection speaking V2 must not be allowed to switch to V3.
+    // The invariant: a connection speaking V4 must not be allowed to switch to V5.
     let mut stream = TcpStream::connect(server.address()).await?;
-    stream.write_all(&serialize_read(PROTOCOL_VERSION_V2, 2).await?).await?;
+    stream.write_all(&serialize_read(PROTOCOL_VERSION_V4, 2).await?).await?;
     match read_frame(&mut stream).await? {
-        Some(v) if v == PROTOCOL_VERSION_V2 => {}
-        Some(v) => return Err(format!("first V2 frame answered at version {v}").into()),
-        None => return Err("connection closed on a valid V2 first frame".into()),
+        Some(v) if v == PROTOCOL_VERSION_V4 => {}
+        Some(v) => return Err(format!("first V4 frame answered at version {v}").into()),
+        None => return Err("connection closed on a valid V4 first frame".into()),
     }
 
-    stream.write_all(&serialize_read(PROTOCOL_VERSION_V3, 3).await?).await?;
+    stream.write_all(&serialize_read(PROTOCOL_VERSION_V5, 3).await?).await?;
     match read_frame(&mut stream).await? {
         None => Ok(()),
         Some(v) => Err(format!(
-            "server accepted a mid-connection V2 -> V3 version switch (answered at version {v}); \
+            "server accepted a mid-connection V4 -> V5 version switch (answered at version {v}); \
              invariants.md requires the first message's version to be pinned"
         )
         .into()),

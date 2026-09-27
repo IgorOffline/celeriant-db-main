@@ -183,12 +183,12 @@ mod tests {
 
     #[test]
     fn untracked_entries_do_not_make_the_tree_dirty() {
-        let porcelain = "?? session/\n M celeriant_chaos/src/main.rs\nA  new.rs\n";
+        let porcelain = "?? scratch/\n M celeriant_chaos/src/main.rs\nA  new.rs\n";
         assert_eq!(
             tracked_changes(porcelain),
             vec![" M celeriant_chaos/src/main.rs", "A  new.rs"]
         );
-        assert!(tracked_changes("?? session/\n?? debate-workspace/\n").is_empty());
+        assert!(tracked_changes("?? scratch/\n?? temporary-output/\n").is_empty());
     }
 
     #[test]

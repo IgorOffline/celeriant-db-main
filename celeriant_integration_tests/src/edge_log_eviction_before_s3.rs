@@ -16,7 +16,7 @@
 //!
 //! This is test #8 in the integration test coverage report.
 //!
-//! Run with: cargo run --bin edge_log_eviction_before_s3_main
+//! Run with: cargo run --release -p celeriant_integration_tests -- --test edge_log_eviction_before_s3
 
 use celeriant_client_tokio::celeriant_client::CeleriantClient;
 use crate::{

@@ -71,6 +71,6 @@ Heartbeats are pure liveness signals. No WAL data. Separate validation path.
 
 ## Wire Format
 
-17-byte fixed header, then payload. Protocol version V2 (bincode, Rust clients) or V3 (msgpack, non-Rust). Server auto-detects from the header and responds in kind. Compression optional (none, zstd, snappy, brotli, gzip).
+17-byte fixed header, then payload. Protocol version V4 (bincode, Rust clients and internode) or V5 (msgpack, non-Rust). Server auto-detects from the header and responds in kind. Compression optional (none, zstd, snappy, brotli, gzip).
 
 See `celeriant_wire/src/network/wire_header.rs` for the header layout. See `celeriant_msg/src/error_codes.rs` for all error codes.

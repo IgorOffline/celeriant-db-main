@@ -3,7 +3,7 @@
 //! Tests basic CRUD operations, idempotency, and listing functionality.
 //! Creates a temporary data directory and spawns the server automatically.
 //!
-//! Run with: cargo run --bin single_main
+//! Run with: cargo run --release -p celeriant_integration_tests -- --test single
 
 use std::collections::HashMap;
 use std::sync::Arc;

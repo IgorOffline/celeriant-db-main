@@ -126,7 +126,7 @@ cat > "$RESULT_FILE" <<EOF
 # Data nodes:  ${DATA_NODE_COUNT:-2}
 # Region:      $REGION
 #
-# --- Campaign cell (session/goal.md). Empty = server default applied, not "unset knob". ---
+# Empty cell values select the server default.
 # TLS mode:              ${TLS_MODE:-strict}
 # S3 enabled:            ${S3_ENABLED:-true}
 # num_shards:            ${NUM_SHARDS:-(default: CPU count)}

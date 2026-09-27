@@ -60,6 +60,7 @@ Each is a thin `fuzz!` wrapper over a `run_*` entry in `src/lib.rs`.
 
 - `bincode_decode` — `fixed_deserialise::<T>`, the untrusted-input entry for every on-wire and on-disk bincode payload. `MAX_DECODE_BYTES` is meant to keep it panic-free.
 - `wire_header` — `WireHeader::from_reader` plus the variable-size codec reader; exercises the version gate and the compressed/uncompressed length guards.
+- `conflict_response` — full V4/V5 conflict frames, decompression, binary keys and nonempty sorted-list validation. Seed from the `*.frame.bin` files in `../fixtures/client-protocol/` and run `cargo afl fuzz -i corpus/conflict_response -o out/conflict_response -V 60 target/release/fuzz_conflict_response`.
 - `serialised_datablock` — the `Inline` decode branch that slices `minibatch[..compressed_size]` with an on-disk `compressed_size` not bounds-checked against the fixed array.
 - `versioned_block` — `deserialise_fallback_batch` behind its CRC32c gate; the harness recomputes the CRC over the mutated body so mutations reach the decode path instead of bouncing off `ChecksumMismatch`.
 - `sbbf` — split-block bloom `contains`/`insert` over a misaligned or short `words` slice.

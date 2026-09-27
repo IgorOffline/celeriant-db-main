@@ -61,6 +61,27 @@ let response = client.read(ReadRequest {
 let order: OrderPlaced = from_json(&response.event_batches[0].events[0])?;
 ```
 
+## Atomic appends and guards
+
+Version 0.3.0 uses client protocol 4 (bincode). Every connection completes a version-checked Identify before its first operation, even without authentication. Explicit `identify()` supplies credentials without an additional unsigned handshake. Reconnects repeat the check; legacy servers and later version changes fail without automatic downgrade or mutation replay. The server also supports protocol 5 (MessagePack).
+
+Use the same builder on a client or pool; all keys must route to one shard:
+
+```rust
+let response = client.write_batch(my_client_id)
+    .append(order_key, events)
+    .guard(fence_key, observed_fence_version)
+    .send().await?;
+```
+
+`.append_with(key, events, WriteEventsOptions)` controls append flags and expected versions. `.guard(key, version)` supplies empty events and disables creation and client idempotency. Duplicate keys reject the builder with `ClientError::ProtocolError` before sending; a later entry never overwrites a guard. Raw `write(WriteRequest)` retains `Result<WriteResponse, ClientError>`.
+
+Guards do not append events or change aggregate versions. A missing aggregate passes only a zero guard; deleted aggregates reject guards. A guard-only batch returns no aggregate version; one append plus guards returns the append's committed version. A successful guard is a conditional observation, not a reservation: later writes can change it, retries after a lost response can fail OCC, and delete/recreate can reuse versions. Durability follows the server's standalone or replicated contract.
+
+Write OCC errors use `ClientError::Server(ServerError::Write { kind: WriteError::OptimisticConcurrencyViolation { conflicts, expected_version, current_aggregate_version }, .. })`; delete uses the equivalent `DeleteError` variant. `conflicts` contains every OCC mismatch from the same validation decision, sorted by the unsigned numeric aggregate key tuple. The optional scalar fields expose the first conflict. Conflict keys remain binary on the wire. Other validation errors can take precedence over OCC. A valid OCC response leaves its connection reusable and is never automatically replayed; malformed or mismatched replies retire it.
+
+Before submission, clients reserve `25 + 74 * N` response body bytes, where `N` counts every entry with an expected version, including guards. A request exceeding the client's receive ceiling fails locally even if its pins would succeed. Servers independently enforce their configured response ceiling. The client defaults to 64 MiB responses; setting response size equal to request size does not guarantee admission. Canonical server errors include malformed guard 2014, write response capacity 2015, and delete response capacity 4008.
+
 ## Connection pool
 
 `CeleriantPool` manages connections and routes both writes and reads to the leader, so reads see your own writes. Follower reads are an explicit opt-in via `route_reads_to_followers`; if every follower is down they fall back to the leader instead of failing. Implements `CeleriantPoolApi` for testing and DI.

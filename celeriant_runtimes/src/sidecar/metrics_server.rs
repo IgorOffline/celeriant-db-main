@@ -67,6 +67,7 @@ fn register_metric_descriptions() {
     describe_counter!("celeriant_write_errors_total", "Failed writes");
     describe_counter!("celeriant_read_errors_total", "Failed reads");
     describe_counter!("celeriant_write_events_total", "Total events written");
+    describe_counter!("celeriant_guard_entries_total", "Guard entries accepted by final validation for submission, counted once across internal retries; not durable commits");
     describe_counter!("celeriant_write_bytes_total", "Total payload bytes written");
     describe_counter!("celeriant_read_bytes_total", "Total payload bytes read");
     describe_counter!("celeriant_client_idempotency_inflight_total", "Duplicate writes rejected as in-flight (client_seq queued/fsynced but not yet read)");

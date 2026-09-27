@@ -37,7 +37,7 @@ use celeriant_msg::{
 use celeriant_wal::{
     aggregate_key::AggregateKey, datablocks::datablock_aggregate_event::DatablockAggregateEvent,
 };
-use celeriant_wire::network::wire_header::PROTOCOL_VERSION_V2;
+use celeriant_wire::network::wire_header::PROTOCOL_VERSION_V4;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use tokio::net::TcpStream;
 use tokio::time::{sleep, Duration as TokioDuration, Instant};
@@ -458,7 +458,7 @@ async fn abandoned_watcher_task(
                 &mut stream,
                 &ClientRequest::Watch(req),
                 10_000_000,
-                PROTOCOL_VERSION_V2,
+                PROTOCOL_VERSION_V4,
             )
             .await;
             cycles.fetch_add(1, Ordering::Relaxed);

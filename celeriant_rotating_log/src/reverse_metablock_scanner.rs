@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::collections::HashMap;
 
 use celeriant_disk::files::read_fixed_records_visit_const::{ReadVisitError, read_fixed_records_visit_const};
@@ -45,6 +46,9 @@ pub struct ReverseMetablockScanner<'a> {
     /// Oldest log_id to visit (default 1). Callers driving a per-segment loop set
     /// it to the starting log_id so one scanner covers exactly one segment.
     min_log_id: u64,
+    /// Set once a skipped segment may hold blocks the visitor would have seen.
+    /// Blocks visited after that may be superseded by ones it never saw.
+    skipped: Option<&'a Cell<bool>>,
 }
 
 impl<'a> ReverseMetablockScanner<'a> {
@@ -61,6 +65,20 @@ impl<'a> ReverseMetablockScanner<'a> {
             chain_follow_window: FIXED_BLOCK_SIZE_BYTES as u64,
             segment_hints: None,
             min_log_id: 1,
+            skipped: None,
+        }
+    }
+
+    /// Report segment skips through `skipped` (see the field doc).
+    #[must_use]
+    pub fn with_skip_flag(mut self, skipped: &'a Cell<bool>) -> Self {
+        self.skipped = Some(skipped);
+        self
+    }
+
+    fn mark_skipped(&self) {
+        if let Some(skipped) = self.skipped {
+            skipped.set(true);
         }
     }
 
@@ -182,6 +200,7 @@ impl<'a> ReverseMetablockScanner<'a> {
                 } else if !bloom.may_contain_hash(hash) {
                     metrics::counter!("celeriant_read_bloom_short_circuit_total").increment(1);
                     tracing::trace!(log_id, "Bloom filter skip");
+                    self.mark_skipped();
                     return Ok(None);
                 }
             }
@@ -190,6 +209,7 @@ impl<'a> ReverseMetablockScanner<'a> {
             if let Some(hash) = self.client_bloom_filter_hash {
                 if !client_bloom.borrow().may_contain_hash(hash) {
                     metrics::counter!("celeriant_read_client_bloom_short_circuit_total").increment(1);
+                    self.mark_skipped();
                     return Ok(None);
                 }
             }
@@ -285,6 +305,7 @@ impl<'a> ReverseMetablockScanner<'a> {
             if let Some(hash) = self.client_bloom_filter_hash {
                 if !client_bloom.borrow().may_contain_hash(hash) {
                     metrics::counter!("celeriant_read_client_bloom_short_circuit_total").increment(1);
+                    self.mark_skipped();
                     return Ok(None);
                 }
             }
@@ -300,6 +321,7 @@ impl<'a> ReverseMetablockScanner<'a> {
         let hint = self.segment_hints.and_then(|h| h.get(&log_id)).copied();
         if hint == Some(SegmentHint::Skip) {
             metrics::counter!("celeriant_read_segment_hint_skip_total").increment(1);
+            self.mark_skipped();
             return Ok(None);
         }
 

@@ -590,9 +590,7 @@ mod tests {
 
     #[test]
     fn the_error_tally_names_the_dominant_kind() {
-        // The phase-5 failure this exists for: a 99% error rate that the old
-        // bare count rendered as "11908 errors" and nothing else. The summary
-        // has to lead with whichever kind actually dominated.
+        // A total error count cannot distinguish timeouts from malformed responses.
         let mut c = ReheatCostCurve::new("cold", 7);
         for _ in 0..10 {
             c.record_error(AgeBucket::FiveMin, ReadErrorKind::RequestTimeout);

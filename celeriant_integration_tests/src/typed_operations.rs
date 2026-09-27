@@ -3,7 +3,7 @@
 //! Tests typed convenience methods, event helpers, ReadAllIterator,
 //! auto-compression, and typed error matching.
 //!
-//! Run with: cargo run --bin typed_operations_main
+//! Run with: cargo run --release -p celeriant_integration_tests -- --test typed_operations
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -11,7 +11,7 @@ use std::sync::Arc;
 use celeriant_client_tokio::{
     CeleriantClient, ReadAllIterator, WriteEventsOptions,
     from_json, json_event,
-    server_error::{DeleteError, ReadError, ServerError, WriteError},
+    server_error::{DeleteError, ReadError, ServerError, TrimError, WriteError},
     client_error::ClientError,
 };
 use crate::TestServer;
@@ -266,32 +266,32 @@ async fn test_trim_start(client: &mut CeleriantClient) {
         user_id: None,
     };
 
-    match client.trim_start(req).await {
-        Ok(_) => {
-            // Read from batch 1 — should error with UnavailableBatchIndex or return from 2
-            let read_req = ReadRequest {
-                correlation_id: None,
-                aggregate_key: agg,
-                filters: ReadFilters::new(1),
-            };
-            match client.read(read_req).await {
-                Err(ClientError::Server(ServerError::Read {
-                    kind: ReadError::UnavailableBatchIndex { .. },
-                    ..
-                })) => pass("trim_start()"),
-                Ok(resp) => {
-                    // If server returns batches, the minimum should be >= 2
-                    let all_trimmed = resp.event_batches.iter().all(|b| b.aggregate_version >= 2);
-                    if all_trimmed {
-                        pass("trim_start()");
-                    } else {
-                        fail("trim_start() — got batches below trim point", resp.event_batches.len());
-                    }
-                }
-                Err(e) => fail("trim_start() read-back", e),
+    if let Err(e) = client.trim_start(req).await {
+        fail("trim_start()", e);
+        return;
+    }
+
+    let below = ReadRequest { correlation_id: None, aggregate_key: agg.clone(), filters: ReadFilters::new(1) };
+    match client.read(below).await {
+        Err(ClientError::Server(ServerError::Read {
+            kind: ReadError::UnavailableBatchIndex { .. },
+            ..
+        })) => pass("trim_start() — read below floor unavailable"),
+        Err(e) => fail("trim_start() read below floor — wrong error", e),
+        Ok(resp) => fail("trim_start() read below floor — expected error", resp.event_batches.len()),
+    }
+
+    let kept = ReadRequest { correlation_id: None, aggregate_key: agg, filters: ReadFilters::new(2) };
+    match client.read(kept).await {
+        Ok(resp) => {
+            let versions: Vec<u64> = resp.event_batches.iter().map(|b| b.aggregate_version).collect();
+            if versions == [2, 3] {
+                pass("trim_start() — kept batches readable");
+            } else {
+                fail("trim_start() read from keep_from — expected [2, 3]", versions);
             }
         }
-        Err(e) => fail("trim_start()", e),
+        Err(e) => fail("trim_start() read from keep_from", e),
     }
 }
 
@@ -435,6 +435,7 @@ async fn test_write_error_optimistic_concurrency(client: &mut CeleriantClient) {
             kind: WriteError::OptimisticConcurrencyViolation {
                 expected_version,
                 current_aggregate_version,
+                ..
             },
             ..
         })) => {
@@ -491,6 +492,66 @@ async fn test_delete_error_aggregate_not_exists(client: &mut CeleriantClient) {
     }
 }
 
+// ─── Test 16: WriteError::ZeroEventType ──────────────────────────────────────
+
+async fn test_write_error_zero_event_type(client: &mut CeleriantClient) {
+    let agg = AggregateKey::new(10, 1, 9905);
+    let event = DatablockAggregateEvent { event_type_major: 0, ..make_event(0, "zero type") };
+    match client.write_events(agg, vec![event], 1).await {
+        Err(ClientError::Server(ServerError::Write {
+            kind: WriteError::ZeroEventType,
+            ..
+        })) => pass("WriteError::ZeroEventType"),
+        Err(e) => fail("WriteError::ZeroEventType — wrong error", e),
+        Ok(_) => fail("WriteError::ZeroEventType — expected error", ()),
+    }
+}
+
+// ─── Test 17: TrimError::IndexOutOfRange ─────────────────────────────────────
+
+async fn test_trim_error_index_out_of_range(client: &mut CeleriantClient) {
+    let agg = AggregateKey::new(10, 1, 9906);
+    if let Err(e) = client.write_events(agg.clone(), vec![make_event(0, "trim range")], 1).await {
+        fail("TrimError::IndexOutOfRange setup write", e);
+        return;
+    }
+    let req = TrimStartRequest {
+        correlation_id: None,
+        aggregate_key: agg,
+        keep_from_aggregate_version: 99,
+        client_id: 1,
+        user_id: None,
+    };
+    match client.trim_start(req).await {
+        Err(ClientError::Server(ServerError::Trim {
+            kind: TrimError::IndexOutOfRange,
+            ..
+        })) => pass("TrimError::IndexOutOfRange"),
+        Err(e) => fail("TrimError::IndexOutOfRange — wrong error", e),
+        Ok(_) => fail("TrimError::IndexOutOfRange — expected error", ()),
+    }
+}
+
+// ─── Test 18: TrimError::AggregateNotExists ──────────────────────────────────
+
+async fn test_trim_error_aggregate_not_exists(client: &mut CeleriantClient) {
+    let req = TrimStartRequest {
+        correlation_id: None,
+        aggregate_key: AggregateKey::new(10, 1, 9907),
+        keep_from_aggregate_version: 1,
+        client_id: 1,
+        user_id: None,
+    };
+    match client.trim_start(req).await {
+        Err(ClientError::Server(ServerError::Trim {
+            kind: TrimError::AggregateNotExists,
+            ..
+        })) => pass("TrimError::AggregateNotExists"),
+        Err(e) => fail("TrimError::AggregateNotExists — wrong error", e),
+        Ok(_) => fail("TrimError::AggregateNotExists — expected error", ()),
+    }
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 
@@ -527,6 +588,9 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     test_write_error_optimistic_concurrency(&mut client).await;
     test_write_error_empty_events(&mut client).await;
     test_delete_error_aggregate_not_exists(&mut client).await;
+    test_write_error_zero_event_type(&mut client).await;
+    test_trim_error_index_out_of_range(&mut client).await;
+    test_trim_error_aggregate_not_exists(&mut client).await;
 
     let failures = FAILURES.load(std::sync::atomic::Ordering::Relaxed);
     if failures > 0 {

@@ -7,12 +7,13 @@
 //! setup times out (~30% of connections). Tests that expect successful TLS
 //! connections retry up to 3 times to tolerate this.
 //!
-//! Run with: cargo run --bin mtls_test_main -p celeriant_integration_tests
+//! Run with: cargo run --release -p celeriant_integration_tests -- --test mtls_test
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use celeriant_client_tokio::celeriant_client::CeleriantClient;
+use celeriant_client_tokio::ClientTlsConfig;
 use crate::{ServerConfig, TestPki, TestServer};
 use celeriant_lib::server_config::{ConfigClientAuth, ConfigTlsMode};
 use celeriant_msg::{
@@ -102,7 +103,16 @@ async fn test_mtls_client_server_roundtrip() -> Result<(), Box<dyn std::error::E
     )
     .await?;
 
-    let aggregate = AggregateKey::new(1, 1, 40001);
+    let tls = pki.build_client_tls_config(&client_cert, &client_key, "localhost")?;
+    roundtrip(&server.address(), tls, AggregateKey::new(1, 1, 40001)).await
+}
+
+/// Write one event and read it back, retrying the whole cycle for the kTLS first-read race.
+async fn roundtrip(
+    address: &str,
+    tls: ClientTlsConfig,
+    aggregate: AggregateKey,
+) -> Result<(), Box<dyn std::error::Error>> {
     let event = DatablockAggregateEvent {
         client_seq: 1,
         event_seq: 0,
@@ -127,11 +137,10 @@ async fn test_mtls_client_server_roundtrip() -> Result<(), Box<dyn std::error::E
     // Retry the full connect+write+read cycle for kTLS flake resilience.
     let mut last_err = String::new();
     for attempt in 0..KTLS_RETRIES {
-        let tls = pki.build_client_tls_config(&client_cert, &client_key, "localhost")?;
         let connect = CeleriantClient::connect_with_timeout(
-            server.address(),
+            address,
             Some(Duration::from_secs(10)),
-            Some(tls),
+            Some(tls.clone()),
         )
         .await;
 
@@ -183,7 +192,7 @@ async fn test_mtls_client_server_roundtrip() -> Result<(), Box<dyn std::error::E
     Err(format!("Round-trip failed after {KTLS_RETRIES} attempts: {last_err}").into())
 }
 
-/// Strict mode must reject a plaintext (non-TLS) connection.
+/// Strict mode admits an anonymous TLS client under client auth `None` and rejects plaintext.
 async fn test_strict_mode_rejects_plaintext() -> Result<(), Box<dyn std::error::Error>> {
     let pki = TestPki::new()?;
     let (node_cert, node_key) = pki.create_node_cert("node")?;
@@ -204,6 +213,10 @@ async fn test_strict_mode_rejects_plaintext() -> Result<(), Box<dyn std::error::
         },
     )
     .await?;
+
+    // Client auth `None` must admit a TLS client that presents no certificate.
+    let anonymous = pki.build_anonymous_tls_config("localhost")?;
+    roundtrip(&server.address(), anonymous, AggregateKey::new(1, 1, 40003)).await?;
 
     let mut client = CeleriantClient::connect_with_timeout(
         server.address(),
@@ -227,7 +240,7 @@ async fn test_strict_mode_rejects_plaintext() -> Result<(), Box<dyn std::error::
     }
 }
 
-/// A client cert signed by an unrelated CA must be rejected by the server.
+/// Client auth `Require` rejects a cert from an unrelated CA and a client with no cert.
 async fn test_untrusted_cert_rejected() -> Result<(), Box<dyn std::error::Error>> {
     let cluster_pki = TestPki::new()?;
     let (node_cert, node_key) = cluster_pki.create_node_cert("node")?;
@@ -252,33 +265,24 @@ async fn test_untrusted_cert_rejected() -> Result<(), Box<dyn std::error::Error>
     )
     .await?;
 
-    let tls = cluster_pki.build_client_tls_config(&rogue_client_cert, &rogue_client_key, "localhost")?;
+    let rogue = cluster_pki.build_client_tls_config(&rogue_client_cert, &rogue_client_key, "localhost")?;
+    expect_rejected(&server.address(), rogue).await?;
+    let anonymous = cluster_pki.build_anonymous_tls_config("localhost")?;
+    expect_rejected(&server.address(), anonymous).await
+}
 
-    match CeleriantClient::connect_with_timeout(
-        server.address(),
-        Some(Duration::from_secs(10)),
-        Some(tls),
-    )
-    .await
-    {
-        Err(_) => {
-            println!("  Rogue client cert correctly rejected (handshake failure)");
-            Ok(())
-        }
-        Ok(mut client) => {
-            let request = ClientRequest::Read(ReadRequest {
-                correlation_id: Some(1),
-                aggregate_key: AggregateKey::new(1, 1, 40005),
-                filters: celeriant_msg::request::read_filters::ReadFilters::new(1),
-            });
-            match client.send_request(&request).await {
-                Err(_) => {
-                    println!("  Rogue client cert rejected on first request");
-                    Ok(())
-                }
-                Ok(r) => Err(format!("Expected rejection but got success: {r:?}").into()),
-            }
-        }
+/// The connection must fail at handshake or on its first request.
+async fn expect_rejected(address: &str, tls: ClientTlsConfig) -> Result<(), Box<dyn std::error::Error>> {
+    let connect = CeleriantClient::connect_with_timeout(address, Some(Duration::from_secs(10)), Some(tls)).await;
+    let Ok(mut client) = connect else { return Ok(()) };
+    let request = ClientRequest::Read(ReadRequest {
+        correlation_id: Some(1),
+        aggregate_key: AggregateKey::new(1, 1, 40005),
+        filters: celeriant_msg::request::read_filters::ReadFilters::new(1),
+    });
+    match client.send_request(&request).await {
+        Err(_) => Ok(()),
+        Ok(r) => Err(format!("Expected rejection but got success: {r:?}").into()),
     }
 }
 

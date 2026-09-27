@@ -23,8 +23,8 @@
 //! RANGE granularity across the flip. It structurally cannot falsify per-entry
 //! interior loss inside one coalescing flush window — the accumulator merges
 //! to (min from, max to), so the wire bytes are identical with or without an
-//! interior event, by product design. The phase 1-3 unit exactly-once oracles
-//! are the falsifier for interior loss.
+//! interior event, by product design. The commit-notify and role-transition unit tests
+//! cover interior loss.
 //!
 //! Follower watch events fire on commit (leader-confirmed drain), never on
 //! follower fsync — that timing split is not observable from a client on a

@@ -562,10 +562,7 @@ pub const DISK_TRUTH_BUDGET: Duration = Duration::from_secs(600);
 /// Run one tear-down step under a deadline, announcing itself on both sides.
 ///
 /// `None` means the step blew its budget. Every caller must degrade to
-/// INCONCLUSIVE on `None`: losing one check is survivable, losing the report is
-/// not. The step is also the missing progress output — phase 7 printed nothing
-/// across its entire duration, which is why a 37-minute hang could only be
-/// localised to a 185-line block.
+/// INCONCLUSIVE on `None` so a missing check cannot produce a passing report.
 async fn step<T>(
     scen: &str,
     what: &str,
@@ -7758,8 +7755,7 @@ fn render_cardinality_report(
 //
 // Two availability defects were observed live on the rig, both under the
 // cardinality fill and neither reproducible on demand. These two scenarios
-// reproduce one each, independently. Both are expected RED until the server is
-// fixed; each is the acceptance test for that fix.
+// exercise each failure independently under sustained load.
 //
 // The load is the ingredient in both cases. `leader_sigkill` passes clean on
 // the same cluster with no load, and an unloaded cluster never wedged — so
@@ -8808,8 +8804,7 @@ mod teardown_step_tests {
 
     #[tokio::test]
     async fn a_step_that_never_finishes_yields_none_instead_of_hanging() {
-        // The whole point. `std::future::pending` is the await that phase 7 had
-        // somewhere in it for 37 minutes; under `step` the run continues.
+        // A stalled check must not prevent later checks or report generation.
         assert_eq!(step("t", "pending", BUDGET, std::future::pending::<u8>()).await, None);
         assert_eq!(step("t", "ready", BUDGET, async { 7u8 }).await, Some(7));
     }
@@ -8907,8 +8902,8 @@ fn leader_write_rate_curve(samples: &[NodeSample], start_ms: u64, end_ms: u64) -
     curve
 }
 
-/// EXPECTED RED (aspirational tier only), banked, `--scenario cold_connect_herd`
-/// only (excluded from `--full`). Codifies the 20k cold-connect envelope: the
+/// Opt-in `--scenario cold_connect_herd`, excluded from `--full`.
+/// Measures the 20k cold-connect envelope: the
 /// bound is the leader's TLS handshake rate, which is CPU-bound on the shard
 /// executors and capped by `CELERIANT_HANDSHAKE_CONCURRENCY` (248 handshakes/s
 /// at the default 8, 313/s at 16, ~107/s with the old inline serialised

@@ -10,7 +10,7 @@ use celeriant_msg::request::requests::IdentifyRequest;
 use celeriant_client_wire::{build_frame, decompress_body, write_frame};
 use celeriant_wal::compression_type::CompressionType;
 use celeriant_wire::network::wire_error::WireError;
-use celeriant_wire::network::wire_header::{PROTOCOL_VERSION_V2, WireHeader};
+use celeriant_wire::network::wire_header::{PROTOCOL_VERSION_V4, WireHeader};
 use tokio::net::TcpStream;
 use tokio::time::{timeout, Duration};
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
@@ -91,8 +91,8 @@ impl ClientStream {
 
 /// Reclassify a response-read failure that happened after the request frame was
 /// flushed. Only a network error means the answer never arrived; an answer that
-/// arrived and could not be read keeps its own typed variant, and its stream is
-/// still clean.
+/// arrived and could not be read keeps its own typed variant; malformed replies
+/// retire the connection.
 fn lost_after_send(e: ClientError) -> ClientError {
     match e {
         ClientError::WireError(WireError::NetworkError(io)) => {
@@ -171,6 +171,7 @@ pub struct CeleriantClient {
     timeout: Option<Duration>,
     pub(crate) current_dict: Option<CachedDict>,
     stream_dirty: bool,
+    protocol_checked: bool,
     next_correlation_id: u128,
 }
 
@@ -203,6 +204,7 @@ impl CeleriantClient {
             timeout: connection_timeout,
             current_dict: None,
             stream_dirty: false,
+            protocol_checked: false,
             next_correlation_id: 1,
         })
     }
@@ -268,6 +270,28 @@ impl CeleriantClient {
         &mut self,
         request: &ClientRequest,
     ) -> Result<ClientResponse, ClientError> {
+        if self.stream_dirty {
+            return Err(ClientError::ProtocolError);
+        }
+        let pinned = match request {
+            ClientRequest::Write(r) => Some(r.writes.values().filter(|entry| entry.expected_version.is_some()).count()),
+            ClientRequest::Delete(r) => Some(r.deletes.values().filter(|entry| entry.expected_version.is_some()).count()),
+            _ => None,
+        };
+        if let Some(pinned) = pinned {
+            let reservation = celeriant_msg::response::responses::conflict_response_reservation(pinned)
+                .ok_or_else(|| WireError::MalformedFrame("conflict response reservation overflow".into()))?;
+            if reservation > self.max_response_size {
+                return Err(WireError::MessageTooLarge {
+                    message_length: reservation,
+                    max_size_bytes: self.max_response_size,
+                }.into());
+            }
+        }
+        if !self.protocol_checked {
+            self.identify(&ClientIdentityConfig { public_key: None, private_key: None, api_key: None })
+                .await.map_err(ClientError::before_mutation)?;
+        }
         let filled;
         let request = if request.correlation_id().is_none() {
             let id = self.take_correlation_id();
@@ -323,7 +347,7 @@ impl CeleriantClient {
         // helper (raw `&[u8]` dict, not a `!Sync` DictCodec), so this request future stays `Send`.
         // Fixed-size requests are never compressed. Nothing here touches the socket.
         let frame = if request.is_variable_size() {
-            let body = request.serialize_body(PROTOCOL_VERSION_V2)?;
+            let body = request.serialize_body(PROTOCOL_VERSION_V4)?;
             let type_id = request.request_type() as u32;
             let compress = self.choose_compression(request) == CompressionType::ZstdDict;
             let dict = self.current_dict.as_ref().map(|d| d.bytes.as_ref());
@@ -335,10 +359,10 @@ impl CeleriantClient {
         self.stream_dirty = true;
         let written = match &frame {
             Some(frame) => {
-                write_frame(&mut self.stream, frame, self.max_request_size, PROTOCOL_VERSION_V2).await
+                write_frame(&mut self.stream, frame, self.max_request_size, PROTOCOL_VERSION_V4).await
             }
             None => {
-                ClientRequest::write_request(&mut self.stream, request, self.max_request_size, PROTOCOL_VERSION_V2)
+                ClientRequest::write_request(&mut self.stream, request, self.max_request_size, PROTOCOL_VERSION_V4)
                     .await
             }
         };
@@ -364,6 +388,9 @@ impl CeleriantClient {
             });
         }
         if response.response_type() != request.request_type().expected_response_type()
+            && !matches!((request, &response),
+                (ClientRequest::Write(_), ClientResponse::WriteConflict(_)) |
+                (ClientRequest::Delete(_), ClientResponse::DeleteConflict(_)))
             && !matches!(
                 response,
                 ClientResponse::GenericError(_) | ClientResponse::ProtocolError(_)
@@ -374,8 +401,19 @@ impl CeleriantClient {
         }
 
         match response {
-            ClientResponse::ProtocolError(_) => Err(ClientError::ProtocolError),
-            ClientResponse::GenericError(error) => Err(ClientError::from_error_response(error)),
+            ClientResponse::WriteConflict(r) => Err(ClientError::Server(r.into())),
+            ClientResponse::DeleteConflict(r) => Err(ClientError::Server(r.into())),
+            ClientResponse::ProtocolError(_) => {
+                self.stream_dirty = true;
+                Err(ClientError::ProtocolError)
+            }
+            ClientResponse::GenericError(error) => {
+                let error = ClientError::from_error_response(error);
+                if matches!(error, ClientError::ProtocolError) {
+                    self.stream_dirty = true;
+                }
+                Err(error)
+            },
             _ => Ok(response),
         }
     }
@@ -387,17 +425,20 @@ impl CeleriantClient {
     /// decompressed with the stateless dict helper once the body is in hand.
     async fn read_response(&mut self) -> Result<ClientResponse, ClientError> {
         let header = WireHeader::from_reader(&mut self.stream, self.max_response_size).await?;
-        if ClientResponse::is_fixed_size_variant(header.message_type) {
+        if header.version != PROTOCOL_VERSION_V4 {
+            return Err(ClientError::ProtocolError);
+        }
+        let response = if ClientResponse::is_fixed_size_variant(header.message_type) {
             let raw = header.read_fixed_body_raw(&mut self.stream).await?;
-            self.stream_dirty = false;
-            Ok(ClientResponse::deserialize_body(header.message_type, &raw, header.version)?)
+            ClientResponse::deserialize_body(header.message_type, &raw, header.version)?
         } else {
             let raw = header.read_variable_body_raw(&mut self.stream).await?;
-            self.stream_dirty = false;
             let dict = self.current_dict.as_ref().map(|d| d.bytes.as_ref());
             let plain = decompress_body(header.compression_type, header.uncompressed_length, &raw, dict)?;
-            Ok(ClientResponse::deserialize_body(header.message_type, &plain, header.version)?)
-        }
+            ClientResponse::deserialize_body(header.message_type, &plain, header.version)?
+        };
+        self.stream_dirty = false;
+        Ok(response)
     }
 
     /// Perform client identity verification handshake
@@ -462,15 +503,24 @@ impl CeleriantClient {
         let stream = &mut self.stream;
         let max_response_size = self.max_response_size;
         let identify_inner = async move {
-            write_identify_request(stream, &req, PROTOCOL_VERSION_V2).await?;
+            write_identify_request(stream, &req, PROTOCOL_VERSION_V4).await?;
 
             let header = WireHeader::from_reader(stream, max_response_size).await?;
+            if header.version != PROTOCOL_VERSION_V4 {
+                return Err(ClientError::ProtocolError);
+            }
             if header.message_type == IDENTIFY_RESPONSE_TYPE_ID {
                 let resp = read_identify_response(header, stream).await?;
+                if resp.correlation_id != req.correlation_id {
+                    return Err(ClientError::CorrelationMismatch { sent: req.correlation_id, received: resp.correlation_id });
+                }
                 return Ok(resp);
             }
             // Server sent a non-Identify response; must be an error
             let response = ClientResponse::read_from_header(header, stream).await?;
+            if response.carries_correlation_id() && response.correlation_id() != req.correlation_id {
+                return Err(ClientError::CorrelationMismatch { sent: req.correlation_id, received: response.correlation_id() });
+            }
             match response {
                 ClientResponse::ProtocolError(_) => Err(ClientError::ProtocolError),
                 ClientResponse::GenericError(err) => Err(ClientError::from_error_response(err)),
@@ -508,6 +558,7 @@ impl CeleriantClient {
             (None, _) => None,
         };
 
+        self.protocol_checked = true;
         Ok(resp.client_id)
     }
 
@@ -533,6 +584,28 @@ mod tests {
                     sockets.push(socket);
                 }
             }
+        });
+        addr
+    }
+
+    async fn identified_silent_server() -> std::net::SocketAddr {
+        use celeriant_msg::process_identify::{read_identify_request, write_identify_response};
+        use celeriant_msg::response::responses::IdentifyResponse;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut stream = socket.compat();
+            let header = WireHeader::from_reader(&mut stream, 64 * 1024 * 1024).await.unwrap();
+            let request = read_identify_request(header, &mut stream).await.unwrap();
+            write_identify_response(&mut stream, &IdentifyResponse {
+                correlation_id: request.correlation_id,
+                client_id: None,
+                access_level: None,
+                compression_dict_sha256: None,
+                compression_dict_bytes: None,
+            }, PROTOCOL_VERSION_V4).await.unwrap();
+            std::future::pending::<()>().await;
         });
         addr
     }
@@ -583,7 +656,7 @@ mod tests {
                 compression_dict_sha256: Some(UNCACHED_SHA.to_string()),
                 compression_dict_bytes: None,
             };
-            write_identify_response(&mut stream, &resp, PROTOCOL_VERSION_V2).await.unwrap();
+            write_identify_response(&mut stream, &resp, PROTOCOL_VERSION_V4).await.unwrap();
             stream.flush().await.unwrap();
             std::future::pending::<()>().await;
         });
@@ -692,28 +765,24 @@ mod tests {
         )
     }
 
-    /// A fixed-size response whose body fails to deserialise has still been fully
-    /// read off the socket, so the stream must stay clean and the connection kept.
+    /// Malformed replies retire the connection even when their whole body was consumed.
     #[tokio::test]
-    async fn a_fixed_size_deserialise_failure_leaves_the_stream_clean() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    async fn a_fixed_size_deserialise_failure_retires_the_stream() {
+        use futures_lite::{AsyncReadExt, AsyncWriteExt};
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            // Drain the request frame so the client's write completes.
-            let mut header = [0u8; 17];
-            socket.read_exact(&mut header).await.unwrap();
-            let body_len =
-                u32::from_le_bytes([header[8], header[9], header[10], header[11]]) as usize;
-            let mut body = vec![0u8; body_len];
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = socket.compat();
+            let header = crate::test_support::request_header(&mut socket, 64 * 1024 * 1024).await.unwrap();
+            let mut body = vec![0u8; header.compressed_length as usize];
             socket.read_exact(&mut body).await.unwrap();
 
             // Correctly-framed fixed-size AggregateDetails response with a corrupt
             // body: an invalid `Option` discriminant for `correlation_id`.
             let mut resp = Vec::new();
-            resp.extend_from_slice(&2u32.to_le_bytes()); // version
+            resp.extend_from_slice(&PROTOCOL_VERSION_V4.to_le_bytes()); // version
             resp.extend_from_slice(&1u32.to_le_bytes()); // message_type = AggregateDetails
             resp.extend_from_slice(&1u32.to_le_bytes()); // compressed_length
             resp.extend_from_slice(&1u32.to_le_bytes()); // uncompressed_length
@@ -732,8 +801,8 @@ mod tests {
             "expected ReadError, got {err:?}"
         );
         assert!(
-            !client.is_stream_dirty(),
-            "the body was fully consumed; the stream must stay clean"
+            client.is_stream_dirty(),
+            "a malformed response must retire the stream"
         );
     }
 
@@ -791,11 +860,13 @@ mod tests {
 
         // The silent server never reads, so its receive buffer fills and this
         // never fits in the socket buffers.
-        let addr = silent_server().await;
+        let addr = identified_silent_server().await;
         let mut client = CeleriantClient::connect(&addr.to_string())
             .await
             .unwrap()
             .with_max_request_size(64 * 1024 * 1024);
+
+        client.identify(&ClientIdentityConfig { public_key: None, private_key: None, api_key: None }).await.unwrap();
 
         let mut writes = std::collections::HashMap::new();
         writes.insert(

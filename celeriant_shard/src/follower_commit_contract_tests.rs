@@ -1,19 +1,6 @@
-//! Blind contract tests for the follower live-TCP deferred commit
-//! (Phase 1). These test the PROMISED behavior: a follower
-//! applying a live replication batch advances its read (visible) cursor to
-//! `max(read, min(leader_confirmed_wal_seq, write))`, never straight to `write`.
-//! All `contract_*` tests are expected RED on unmodified main (today the
-//! follower fully commits at fsync); `unchanged_*` tests must be green
-//! throughout.
-//!
-//! Scaffolding notes:
-//! - Real wire batches are produced by running an actual leader shard against a
-//!   capturing replication client, so the follower applies exactly what a leader
-//!   sends (metablocks + datablocks), not synthetic metablocks.
-//! - Cursor observation is disk truth: close the shard, re-open the log segments
-//!   cache on the shard dir, read the recovered header metadata. Re-opening the
-//!   follower between carriers is contract-aligned (crash-restart must show
-//!   less, never more).
+//! Live replication advances the follower's visible cursor only to
+//! `max(read, min(leader_confirmed_wal_seq, write))`.
+//! Tests capture real leader batches and reopen the WAL to verify persisted cursors.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -379,7 +366,6 @@ async fn next_watch_event(subscriber: &Rc<RefCell<SubscribedClient>>) -> Option<
 /// INVARIANT: a follower applying a live TCP batch advances read to
 /// `min(leader_confirmed_wal_seq, write)`, NOT to `write`. Entries applied and
 /// durable but not yet leader-confirmed stay above the read cursor.
-/// Expected RED on unmodified main (read == write after fsync today).
 #[test]
 fn contract_follower_apply_defers_read_to_leader_confirmed() {
     glommio_test!({
@@ -407,7 +393,6 @@ fn contract_follower_apply_defers_read_to_leader_confirmed() {
 
 /// INVARIANT: entries applied-but-unconfirmed are committed by a later carrier
 /// (here a duplicate/probe-style batch) bearing a higher leader_confirmed_wal_seq.
-/// Expected RED on unmodified main (first observation: read already at write).
 #[test]
 fn contract_covering_carrier_advances_read_over_parked_entries() {
     glommio_test!({
@@ -439,7 +424,6 @@ fn contract_covering_carrier_advances_read_over_parked_entries() {
 /// INVARIANT: read is monotonic non-decreasing. A stale/reordered carrier with a
 /// LOWER leader_confirmed_wal_seq never moves read backwards; and it still does
 /// not commit to write. Exact expected value: max(read, min(confirmed, write)).
-/// Expected RED on unmodified main (read lands on write, not on tip1).
 #[test]
 fn contract_stale_carrier_never_regresses_read() {
     glommio_test!({
@@ -505,7 +489,6 @@ fn contract_confirmed_ahead_of_durable_write_clamps_at_write() {
 /// batch's tip as leader_confirmed_wal_seq (the captured, real leader behavior),
 /// the follower's read cursor lags its write cursor by exactly one batch, and
 /// converges to the tip once a final carrier confirms it.
-/// Expected RED on unmodified main (no lag exists: read == write every step).
 #[test]
 fn contract_read_lags_write_by_one_batch_and_converges() {
     glommio_test!({
@@ -561,7 +544,7 @@ fn contract_read_lags_write_by_one_batch_and_converges() {
 /// INVISIBLE through every reachable read surface — point read, existence
 /// check, listing — and becomes visible only after a covering carrier. The
 /// cursor is not the whole commit: this falsifies "deferred the cursor but not
-/// the read-side set". Expected RED on unmodified main (visible at fsync).
+/// the read-side set".
 #[test]
 fn contract_unconfirmed_aggregate_invisible_on_every_read_surface() {
     glommio_test!({
@@ -612,8 +595,7 @@ fn contract_unconfirmed_aggregate_invisible_on_every_read_surface() {
 
 /// INVARIANT: an aggregate with confirmed history and an unconfirmed tail
 /// serves ONLY the committed prefix — point read, version details — until a
-/// covering carrier confirms the tail. Expected RED on unmodified main
-/// (the whole history is visible at fsync).
+/// covering carrier confirms the tail.
 #[test]
 fn contract_committed_prefix_served_uncommitted_tail_hidden() {
     glommio_test!({
@@ -657,7 +639,6 @@ fn contract_committed_prefix_served_uncommitted_tail_hidden() {
 /// INVARIANT: a follower watch subscriber receives the event for an entry only
 /// at-or-after a carrier confirms that entry — never at fsync/apply time —
 /// exactly once, in wal_seq order across the confirmation boundary.
-/// Expected RED on unmodified main (events fire at fsync today).
 #[test]
 fn contract_follower_watch_fires_on_confirmation_not_fsync() {
     glommio_test!({

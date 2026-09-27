@@ -13,7 +13,7 @@
 //! 6. Verify the write succeeds (AlreadyExists treated as Ok)
 //! 7. Verify the pre-seeded objects are NOT overwritten — still contain garbage
 //!
-//! Run with: cargo run --bin s3_fallback_createonly_main
+//! Run with: cargo run --release -p celeriant_integration_tests -- --test s3_fallback_createonly
 
 use celeriant_client_tokio::celeriant_client::CeleriantClient;
 use crate::{poll_converged_count, s3_cluster_config, write_event, MinioContainer, TestServer, FOLLOWER_CONVERGENCE_TIMEOUT};

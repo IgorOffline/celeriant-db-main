@@ -1,4 +1,4 @@
-//! Blind contract tests for the lease orchestrator's status handling.
+//! Contract tests for the lease orchestrator's status handling.
 //!
 //! C1 — For every status the system can install, the orchestrator loop must
 //!      have a branch that does real work. A status matching no branch means

@@ -2,7 +2,7 @@ use celeriant_msg::{
     error_codes::*,
     process_client_responses::ClientResponse,
     process_cluster_responses::ClusterResponse,
-    response::responses::ErrorResponse,
+    response::responses::{DeleteConflictResponse, ErrorResponse, WriteConflictResponse},
 };
 use celeriant_shard::error::{
     fetch_datablock_error::FetchDatablockError,
@@ -26,8 +26,18 @@ use celeriant_watch::aggregate_reader::WatchReadError;
 use super::connection_handler::ShardRoutingError;
 
 pub fn shard_error_to_client_response(correlation_id: Option<u128>, error: ShardError) -> ClientResponse {
-    let (error_code, error_message) = shard_error_to_code(error);
-    ClientResponse::GenericError(ErrorResponse { correlation_id, error_code, error_message })
+    match error {
+        ShardError::Write(ShardWriteError::OptimisticConcurrencyViolation { conflicts }) => {
+            ClientResponse::WriteConflict(WriteConflictResponse { correlation_id, conflicts })
+        }
+        ShardError::Delete(ShardDeleteError::OptimisticConcurrencyViolation { conflicts }) => {
+            ClientResponse::DeleteConflict(DeleteConflictResponse { correlation_id, conflicts })
+        }
+        other => {
+            let (error_code, error_message) = shard_error_to_code(other);
+            ClientResponse::GenericError(ErrorResponse { correlation_id, error_code, error_message })
+        }
+    }
 }
 
 pub fn shard_error_to_cluster_response(correlation_id: Option<u128>, error: ShardError) -> ClusterResponse {
@@ -116,10 +126,9 @@ fn write_error(e: ShardWriteError) -> (u32, String) {
             WRITE_INFLIGHT_DUPLICATE,
             format!(r#"{{"last_client_seq":{},"attempted_client_seq":{}}}"#, last_client_seq, attempted_client_seq),
         ),
-        ShardWriteError::OptimisticConcurrencyViolation { expected_version, current_aggregate_version } => (
-            WRITE_OPTIMISTIC_CONCURRENCY_VIOLATION,
-            format!(r#"{{"expected_version":{},"current_aggregate_version":{}}}"#, expected_version, current_aggregate_version),
-        ),
+        ShardWriteError::OptimisticConcurrencyViolation { .. } => (WRITE_OPTIMISTIC_CONCURRENCY_VIOLATION, "{}".into()),
+        ShardWriteError::MalformedGuardEntry => (WRITE_MALFORMED_GUARD_ENTRY, "{}".into()),
+        ShardWriteError::ConflictResponseTooLarge { required, max_size } => (WRITE_CONFLICT_RESPONSE_TOO_LARGE, capacity_message(required, max_size)),
         ShardWriteError::FailedToSerialiseDatablocks(e) => (
             WRITE_FAILED_TO_SERIALISE_DATABLOCKS,
             format!(r#"{{"detail":{}}}"#, json_string(&format!("{:?}", e))),
@@ -155,6 +164,11 @@ fn write_error(e: ShardWriteError) -> (u32, String) {
     }
 }
 
+fn capacity_message(required: Option<u64>, max_size: u64) -> String {
+    let required = required.map_or_else(|| "null".to_owned(), |value| value.to_string());
+    format!(r#"{{"required":{required},"max_size":{max_size}}}"#)
+}
+
 fn trim_error(e: ShardTrimError) -> (u32, String) {
     match e {
         ShardTrimError::AggregateNotExists => (TRIM_AGGREGATE_NOT_EXISTS, "{}".into()),
@@ -174,10 +188,8 @@ fn delete_error(e: ShardDeleteError) -> (u32, String) {
     match e {
         ShardDeleteError::AggregateNotExists => (DELETE_AGGREGATE_NOT_EXISTS, "{}".into()),
         ShardDeleteError::EmptyDeleteList => (DELETE_EMPTY_DELETE_LIST, "{}".into()),
-        ShardDeleteError::OptimisticConcurrencyViolation { expected_version, current_aggregate_version } => (
-            DELETE_OPTIMISTIC_CONCURRENCY_VIOLATION,
-            format!(r#"{{"expected_version":{},"current_aggregate_version":{}}}"#, expected_version, current_aggregate_version),
-        ),
+        ShardDeleteError::OptimisticConcurrencyViolation { .. } => (DELETE_OPTIMISTIC_CONCURRENCY_VIOLATION, "{}".into()),
+        ShardDeleteError::ConflictResponseTooLarge { required, max_size } => (DELETE_CONFLICT_RESPONSE_TOO_LARGE, capacity_message(required, max_size)),
         ShardDeleteError::AggregateExistsAndCacheError(e) => cache_load_error(DELETE_CACHE_ERROR, DELETE_CACHE_ERROR, e),
         ShardDeleteError::ReplicationError(e) => (DELETE_REPLICATION_ERROR, replication_message(e)),
         ShardDeleteError::ShardFsyncError(e) => (DELETE_FSYNC_ERROR, fsync_message(e)),
@@ -392,44 +404,28 @@ mod tests {
     }
 
     #[test]
-    fn write_occ_violation_response() {
-        let resp = shard_error_to_client_response(
-            None,
-            ShardError::Write(ShardWriteError::OptimisticConcurrencyViolation {
-                expected_version: 5,
-                current_aggregate_version: 7,
-            }),
-        );
-        match resp {
-            ClientResponse::GenericError(e) => {
-                assert_eq!(e.error_code, WRITE_OPTIMISTIC_CONCURRENCY_VIOLATION);
-                assert_eq!(
-                    e.error_message,
-                    r#"{"expected_version":5,"current_aggregate_version":7}"#
-                );
+    fn occ_responses_preserve_binary_keys_and_complete_conflicts() {
+        use celeriant_msg::response::responses::AggregateConflict;
+        use celeriant_wal::aggregate_key::AggregateKey;
+        let conflicts = vec![
+            AggregateConflict { key: AggregateKey::new(1, 2, 3), expected: 5, current: 7 },
+            AggregateConflict { key: AggregateKey::new(u128::MAX, u128::MAX, u128::MAX), expected: u64::MAX, current: 0 },
+        ];
+        let write = shard_error_to_client_response(Some(u128::MAX), ShardError::Write(ShardWriteError::OptimisticConcurrencyViolation { conflicts: conflicts.clone() }));
+        let delete = shard_error_to_client_response(Some(u128::MAX), ShardError::Delete(ShardDeleteError::OptimisticConcurrencyViolation { conflicts: conflicts.clone() }));
+        match write {
+            ClientResponse::WriteConflict(reply) => {
+                assert_eq!(reply.correlation_id, Some(u128::MAX));
+                assert_eq!(reply.conflicts, conflicts);
             }
-            _ => panic!("expected GenericError"),
+            other => panic!("expected typed write conflicts, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn delete_occ_violation_response() {
-        let resp = shard_error_to_client_response(
-            None,
-            ShardError::Delete(ShardDeleteError::OptimisticConcurrencyViolation {
-                expected_version: 1,
-                current_aggregate_version: 3,
-            }),
-        );
-        match resp {
-            ClientResponse::GenericError(e) => {
-                assert_eq!(e.error_code, DELETE_OPTIMISTIC_CONCURRENCY_VIOLATION);
-                assert_eq!(
-                    e.error_message,
-                    r#"{"expected_version":1,"current_aggregate_version":3}"#
-                );
+        match delete {
+            ClientResponse::DeleteConflict(reply) => {
+                assert_eq!(reply.correlation_id, Some(u128::MAX));
+                assert_eq!(reply.conflicts, conflicts);
             }
-            _ => panic!("expected GenericError"),
+            other => panic!("expected typed delete conflicts, got {other:?}"),
         }
     }
 

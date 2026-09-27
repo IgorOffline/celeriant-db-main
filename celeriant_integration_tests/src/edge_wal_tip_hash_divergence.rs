@@ -19,7 +19,7 @@
 //!      and re-applies the correct events from S3.
 //! 7. Verify: B auto-healed and caught up to 8 events, A is still healthy.
 //!
-//! Run with: cargo run --bin edge_wal_tip_hash_divergence_main
+//! Run with: cargo run --release -p celeriant_integration_tests -- --test edge_wal_tip_hash_divergence
 
 use celeriant_client_tokio::celeriant_client::CeleriantClient;
 use crate::{

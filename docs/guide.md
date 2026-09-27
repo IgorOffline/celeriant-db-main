@@ -266,8 +266,7 @@ When a concurrency conflict happens, the error tells you exactly what went wrong
 match result {
     Err(ClientError::Server(ServerError::Write {
         kind: WriteError::OptimisticConcurrencyViolation {
-            expected_version,
-            current_aggregate_version,
+            conflicts, ..
         }, ..
     })) => {
         // Re-read, re-validate, retry
@@ -277,6 +276,29 @@ match result {
 ```
 
 There is no automatic retry on OCC failures. That's by design. Only your domain logic knows whether a retry is safe. Catch up to the tip of the aggregate event stream, re-validate your business rules, and try again.
+
+Write and delete OCC errors contain every mismatched key from one final validation decision. Conflicts are sorted by the unsigned numeric `(org_id, aggregate_type_id, aggregate_id)` tuple. Keys remain binary in both supported codecs. A missing/deleted aggregate or another non-OCC rejection can take precedence; complete OCC reporting does not provide keyed attribution for those other errors.
+
+### Guarding another aggregate without appending to it
+
+A multi-entry write can append to one aggregate only while another aggregate remains at a chosen head. Add an entry with `events: vec![]`, `expected_version: Some(head)`, `allow_create: false` and `enforce_client_idempotency: false`. All entries must route to the same shard. Use the client multi-entry API; the CLI has no multi-entry syntax.
+
+```rust
+pool.write_batch(my_client_id)
+    .append(order_key, vec![order_placed_event])
+    .guard(inventory_key, inventory_head)
+    .send().await?;
+```
+
+The same builder is available on a single `CeleriantClient`. Use `append_with(key, events, WriteEventsOptions { .. })` to pin the writing entry or enable its client idempotency. Repeated keys in one builder are rejected before sending.
+
+An absent aggregate passes a zero guard. A positive pin on an absent aggregate returns `AggregateNotExists`. Deleted and pending-deleted targets always reject guards, even when recreation is allowed. A live guard compares its current head, including after `TrimStart`; a pin below the trim floor is an OCC conflict.
+
+Guards add no events, versions, idempotency entries, watch notifications, WAL records or replication records. One append plus any guards returns that append's committed `max_aggregate_version`. Multiple appends or a guard-only request return `None`. Guard-only requests perform the normal durability waits and rollback-generation checks.
+
+A successful guard is a conditional observation at the decision, not a reservation. Several independent writes can pass an unchanged shared guard. Advancing that guard's aggregate prevents subsequent stale guarded writes. A lost successful response followed by retry can fail OCC; delete/recreate can reuse a head version. Standalone success retains standalone durability; replicated success retains the existing replicated durability contract.
+
+The server reserves `25 + 74*N` uncompressed response-body bytes for N version-pinned entries before mutation. Clients independently apply the reservation against their receive ceiling. A request can therefore be rejected even when every pin would have succeeded. Defaults are 16 MiB server request and 64 MiB server response; setting equal ceilings does not prove that a conflict response fits. Compression never truncates a conflict list. See the [protocol contract](client-protocol.md) for the breaking V4/V5 release.
 
 ### Exactly-once writes
 
@@ -539,7 +561,7 @@ use celeriant_client_tokio::{ClientError, server_error::*};
 match pool.write(request).await {
     Ok(response) => { /* success */ }
     Err(ClientError::Server(ServerError::Write {
-        kind: WriteError::OptimisticConcurrencyViolation { expected_version, current_aggregate_version }, ..
+        kind: WriteError::OptimisticConcurrencyViolation { expected_version, current_aggregate_version, .. }, ..
     })) => { /* OCC conflict - retry with fresh state */ }
     Err(ClientError::Server(ServerError::Write {
         kind: WriteError::ClientIdempotencyViolation { .. }, ..

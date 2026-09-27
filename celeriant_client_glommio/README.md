@@ -19,20 +19,19 @@ Caller
 │  - max_response_size    │
 │  - timeout_duration     │
 └──────────┬──────────────┘
-           │ send_request(ClientRequest)
            │ send_cluster_request(ClusterRequest)
            │
            ▼
 ┌──────────────────────┐    ┌──────────────────────────┐
 │  celeriant_wire      │    │  celeriant_msg           │
-│  (framing/codec)     │───>│  ClientRequest/Response  │
+│  (framing/codec)     │───>│                          │
 └──────────────────────┘    │  ClusterRequest/Response │
                             └──────────────────────────┘
 ```
 
-**Two request paths**: `send_request` handles client-facing operations (`ClientRequest` / `ClientResponse`). `send_cluster_request` handles cluster-internal operations (`ClusterRequest` / `ClusterResponse`). Both share the same timeout, framing, and error-handling logic.
+**Request path**: `send_cluster_request` handles cluster-internal operations (`ClusterRequest` / `ClusterResponse`). This crate does not expose a client-operation transport; use `celeriant_client_tokio` for public write APIs. Internode traffic uses protocol version 4.
 
-**Timeout**: When `timeout_duration` is set, both send methods race the request future against a `glommio::timer::Timer` using the `futures_lite::future::or` combinator. `None` from `or` means the timer won.
+**Timeout**: When `timeout_duration` is set, the send method races the request future against a `glommio::timer::Timer` using the `futures_lite::future::or` combinator. `None` from `or` means the timer won.
 
 ## Key Types
 
@@ -48,7 +47,6 @@ Caller
 |----------|---------||
 | `CeleriantClient::connect_with_timeout` | Plaintext TCP connect with optional `Duration` |
 | `CeleriantClient::connect_with_timeout_tls` | Connect with optional TLS (kTLS); superset of plaintext connect |
-| `CeleriantClient::send_request` | Send `ClientRequest`, receive `ClientResponse`; applies timeout if set |
 | `CeleriantClient::send_cluster_request` | Send `ClusterRequest`, receive `ClusterResponse`; same timeout logic |
 | `CeleriantClient::with_max_request_size` | Builder: override 10MB default |
 | `CeleriantClient::with_timeout` | Builder: set per-request timeout |
@@ -104,7 +102,7 @@ Nagle's algorithm is disabled immediately after the connection is established. C
 | `ConnectionFailed(GlommioError)` | TCP connect or socket operation failed |
 | `SetNoDelayError(GlommioError)` | Failed to set TCP_NODELAY |
 | `KtlsError(KtlsError)` | kTLS handshake or key installation failed |
-| `RequestTimeout` | `send_request` / `send_cluster_request` timeout exceeded |
+| `RequestTimeout` | `send_cluster_request` timeout exceeded |
 | `RequestProtocolError` | Server returned a `ProtocolError` response |
 | `NotLeader { leader_address, error }` | Server is not the shard leader; `leader_address` contains redirect target |
 | `CeleriantError(ErrorResponse)` | Server returned a named error |
@@ -121,3 +119,36 @@ Nagle's algorithm is disabled immediately after the connection is established. C
 - `futures-lite` - `or` combinator
 - `rustls` / `rustls-pki-types` - TLS configuration types
 - `libc` - TCP keepalive socket options
+
+## Raw guard request construction
+
+The public client message shape is runtime independent. Code constructing requests in a Glommio application can build a guard alongside appends without a touch event:
+
+```rust
+use std::collections::HashMap;
+use celeriant_msg::request::requests::{SingleAggregateWrite, WriteRequest};
+
+let request = WriteRequest {
+    correlation_id: None,
+    client_id: my_client_id,
+    user_id: None,
+    writes: HashMap::from([
+        (target_key, SingleAggregateWrite {
+            events,
+            allow_create: true,
+            expected_version: None,
+            enforce_client_idempotency: false,
+        }),
+        (fence_key, SingleAggregateWrite {
+            events: Vec::new(),
+            allow_create: false,
+            expected_version: Some(observed_fence_version),
+            enforce_client_idempotency: false,
+        }),
+    ]),
+};
+```
+
+Use distinct keys on the same shard. Sending this client request requires a separate client-protocol transport, not `send_cluster_request`. Such a transport must complete a version-checked Identify before mutations, pin version 4 (bincode) or 5 (MessagePack), reserve `25 + 74 * N` receive bytes for pinned entries, and consume typed write/delete conflict responses. See [the client protocol contract](../docs/client-protocol.md) and the [Tokio client API](../celeriant_client_tokio/README.md).
+
+A guard adds no events and reserves nothing beyond its validation decision. Guard-only success has no aggregate version; a single append plus guards reports the append version. A lost success response followed by retry can fail OCC, and delete/recreate can reuse head versions.
