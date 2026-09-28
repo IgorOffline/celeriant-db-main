@@ -17,9 +17,9 @@ release.
 
 - Identify is the mandatory first frame on every client connection. Any other
   first frame gets `ProtocolError` and the connection closes. Rust and Go
-  clients already comply. The .NET `WatchConnection` identifies only with an
-  identity config, so a .NET watch without one now fails until it sends the
-  probe.
+  clients already comply. The .NET client complies from 0.10.0: pool, watch,
+  and standalone connections send Identify even without an identity config.
+  Earlier .NET clients that omit Identify are incompatible with this server.
 - Replication connections open with a dictionary sha hello (types 108/109).
   Nodes on different dictionaries, or a node without the hello, refuse to
   replicate. Mixed-version clusters don't pair in either direction.
@@ -46,6 +46,19 @@ release.
   shipped in Identify responses.
 - `celeriant_internode_dictionary_mismatch_total{role}` counts refused
   replication hellos. Both sides log ERROR naming both shas.
+
+### Fixed
+
+- A read whose reply was lost after it was sent failed on the last or only
+  node the tokio pool tried, reported as `all nodes unreachable`. It is now sent
+  once more to that node, and a second loss returns `ConnectionLostAfterSend`.
+- A `read_all` stream failed when one page's reply was lost. The page is now
+  sent once more to the node the stream started on, from the same cursor, so no
+  batch is repeated or skipped. The list iterators are unchanged.
+- The reference app returned 500 for a deposit, withdraw or transfer whose
+  reply was lost after sending, even when the write had landed. It now retries
+  with the same `client_seq`, as it does on a timeout. Writes are still never
+  re-sent by the pool.
 
 ### Known issues
 

@@ -307,12 +307,12 @@ The server reserves `25 + 74*N` uncompressed response-body bytes for N version-p
 
 ### Exactly-once writes
 
-Set `enforce_client_idempotency: true` and provide a `client_seq` on each event. Celeriant tracks the highest `client_seq` per `(aggregate_key, client_id)`. If a write is retried due to a timeout and the original already landed, the server rejects the duplicate with `ClientIdempotencyViolation` instead of writing it twice.
+Set `enforce_client_idempotency: true` and provide a `client_seq` on each event. Celeriant tracks the highest `client_seq` per `(aggregate_key, client_id)`. If a write is retried after a timeout or a lost reply and the original already landed, the server rejects the duplicate with `ClientIdempotencyViolation` instead of writing it twice.
 
 The retry behaviour depends on why the write failed:
 
 - **OCC failure**: re-derive `client_seq` from fresh state (the aggregate moved, your index assumption was wrong)
-- **Timeout**: hold `client_seq` constant (the write may have already landed, changing the index would bypass the dedup check)
+- **Timeout or lost reply** (`RequestTimeout`, `ConnectionLostAfterSend`): hold `client_seq` constant (the write may have already landed, changing the index would bypass the dedup check)
 - **Idempotency violation**: the prior attempt already landed. Treat as success.
 
 See the [reference example](../celeriant_reference/src/account_service.rs) for the full retry loop with all three cases handled.
@@ -394,6 +394,8 @@ while let Some(result) = iter.next().await {
 // Or collect all at once
 let all_batches = pool.read_all(key.clone(), Some(ReadFilters::new(1))).await?.collect().await?;
 ```
+
+A stream stays on the node that served its first page. A page whose reply is lost is sent once more to that node from the same cursor, and a second loss ends the stream with `ConnectionLostAfterSend`. Moving to another replica could hand the cursor to one further behind, which would end the stream early without an error.
 
 ### Aggregate details
 
@@ -577,7 +579,7 @@ match pool.write(request).await {
     })) => { /* prior attempt already landed - treat as success */ }
     Err(ClientError::NotLeader { leader_address, .. }) => { /* pool handles this automatically */ }
     Err(ClientError::ServerBusy) => { /* back off and retry */ }
-    Err(ClientError::RequestTimeout) => { /* ambiguous - hold idempotency key constant on retry */ }
+    Err(ClientError::RequestTimeout | ClientError::ConnectionLostAfterSend(_)) => { /* ambiguous - hold idempotency key constant on retry */ }
     Err(e) => { /* unexpected error */ }
 }
 ```

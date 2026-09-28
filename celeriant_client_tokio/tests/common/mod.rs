@@ -30,7 +30,12 @@ pub enum Answer {
     CloseAfterNth(usize),
     /// The first request waits for `release`; later ones answer straight away.
     HoldFirst(Arc<AtomicBool>),
+    /// Answers each fully read request with the script's reply; `None` closes
+    /// the socket without answering.
+    Script(Script),
 }
+
+pub type Script = Arc<dyn Fn(&ClientRequest) -> Option<ClientResponse> + Send + Sync>;
 
 pub struct Fake {
     pub addr: SocketAddr,
@@ -136,6 +141,10 @@ async fn connection(socket: tokio::net::TcpStream, answer: Answer, requests: Arc
 
         let resp = match &answer {
             Answer::CloseAfterNth(n) if nth >= *n => return,
+            Answer::Script(script) => match script(&request) {
+                Some(resp) => resp,
+                None => return,
+            },
             Answer::CloseAfterNth(_) => ClientResponse::Write(WriteResponse {
                 correlation_id: asked,
                 max_aggregate_version: Some(1),

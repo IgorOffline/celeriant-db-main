@@ -25,8 +25,7 @@ pub enum ClientError {
     /// The client should retry after a brief backoff.
     ServerBusy,
     ConnectionTimeout,
-    /// The request was fully written and the node never answered. It may or may
-    /// not have been applied, so it must never be re-sent anywhere.
+    /// The request was fully written and the node never answered
     ConnectionLostAfterSend(std::io::Error),
     /// Gave up waiting for a pool slot to `address`. No node was contacted and
     /// no byte was sent, so retrying cannot duplicate the request.

@@ -310,9 +310,9 @@ impl MemAccountService {
                     re_derive_cei = true;
                     continue;
                 }
-                Err(ClientError::RequestTimeout) => {
-                    // Timeout is ambiguous; hold clientSeq constant
-                    tracing::warn!("Timeout on deposit for {account_id:x}, attempt {attempt}");
+                Err(ClientError::RequestTimeout | ClientError::ConnectionLostAfterSend(_)) => {
+                    // The write may have landed; hold clientSeq constant
+                    tracing::warn!("Unknown outcome on deposit for {account_id:x}, attempt {attempt}");
                     continue;
                 }
                 Err(ClientError::Server(ServerError::Write {
@@ -428,8 +428,8 @@ impl MemAccountService {
                     re_derive_cei = true;
                     continue;
                 }
-                Err(ClientError::RequestTimeout) => {
-                    tracing::warn!("Timeout on withdraw for {account_id:x}, attempt {attempt}");
+                Err(ClientError::RequestTimeout | ClientError::ConnectionLostAfterSend(_)) => {
+                    tracing::warn!("Unknown outcome on withdraw for {account_id:x}, attempt {attempt}");
                     continue;
                 }
                 Err(ClientError::Server(ServerError::Write {
@@ -589,8 +589,8 @@ impl MemAccountService {
                     re_derive_cei = true;
                     continue;
                 }
-                Err(ClientError::RequestTimeout) => {
-                    tracing::warn!("Timeout on transfer, attempt {attempt}");
+                Err(ClientError::RequestTimeout | ClientError::ConnectionLostAfterSend(_)) => {
+                    tracing::warn!("Unknown outcome on transfer, attempt {attempt}");
                     continue;
                 }
                 Err(ClientError::Server(ServerError::Write {

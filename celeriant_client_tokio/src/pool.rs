@@ -111,9 +111,10 @@ macro_rules! leader_route {
 /// async method borrows have no lifetime issues.
 ///
 /// Connection-class failures skip to the next candidate (clearing the leader
-/// cache when the pinned leader was the one that failed). In leader-pinned
-/// mode `ServerBusy`/`RequestTimeout` return to the caller rather than
-/// silently downgrading the read to a follower.
+/// cache when the pinned leader was the one that failed). A reply lost on the
+/// last candidate is re-sent once to that node on another connection. In
+/// leader-pinned mode `ServerBusy`/`RequestTimeout` return to the caller
+/// rather than silently downgrading the read to a follower.
 macro_rules! read_route {
     ($pool:expr, $client:ident => $body:expr) => {{
         let pool: &CeleriantPool = $pool;
@@ -122,8 +123,13 @@ macro_rules! read_route {
             return Err(err_no_addresses());
         }
         let to_followers = pool.options.route_reads_to_followers;
-        for (i, addr) in addrs.iter().enumerate() {
-            let pinned_leader = !to_followers && i == 0;
+        let mut resent_on_last = false;
+        let mut i = 0;
+        while i < addrs.len() {
+            let addr = &addrs[i];
+            i += 1;
+            let last = i == addrs.len();
+            let pinned_leader = !to_followers && i == 1;
             let node = pool.get_or_create_node(addr);
             match node.get().await {
                 Ok(mut conn) => {
@@ -149,23 +155,32 @@ macro_rules! read_route {
                             if pinned_leader { pool.clear_leader(); }
                             continue;
                         }
-                        Err(ClientError::ReadError(_))
-                        // A read is safe to retry, so a lost response is just
-                        // another broken candidate.
-                        | Err(ClientError::ConnectionLostAfterSend(_)) => {
+                        Err(ClientError::ReadError(_)) => {
                             conn.mark_broken();
                             if pinned_leader { pool.clear_leader(); }
+                            continue;
+                        }
+                        // A read is safe to retry, so a lost response is just
+                        // another broken candidate. With none left, it goes
+                        // once more to this node.
+                        Err(e @ ClientError::ConnectionLostAfterSend(_)) => {
+                            conn.mark_broken();
+                            if pinned_leader { pool.clear_leader(); }
+                            if !last { continue; }
+                            if resent_on_last { return Err(e); }
+                            resent_on_last = true;
+                            i -= 1;
                             continue;
                         }
                         Err(e @ ClientError::RequestTimeout) => {
                             conn.mark_broken();
                             // Last candidate: surface the real error, never
                             // "all unreachable" the node answered.
-                            if to_followers && i + 1 < addrs.len() { continue; }
+                            if to_followers && !last { continue; }
                             return Err(e);
                         }
                         Err(e @ ClientError::ServerBusy) => {
-                            if to_followers && i + 1 < addrs.len() { continue; }
+                            if to_followers && !last { continue; }
                             return Err(e);
                         }
                         Err(e) => return Err(e),
@@ -181,7 +196,7 @@ macro_rules! read_route {
                 }
                 // A local pool wait doesnt clear cleader
                 Err(e @ ClientError::PoolTimeout { .. }) => {
-                    if i + 1 < addrs.len() { continue; }
+                    if !last { continue; }
                     return Err(e);
                 }
                 Err(e) => return Err(e),
@@ -1372,9 +1387,12 @@ impl CeleriantPool {
 /// Streaming read-all iterator that holds a pooled connection for its lifetime.
 ///
 /// Owns the `PooledConnection` directly and implements pagination inline,
-/// avoiding any lifetime or unsafe concerns.
+/// avoiding any lifetime or unsafe concerns. A page whose reply is lost is
+/// sent once more on another connection to the same node.
 pub struct PooledReadAllIterator {
-    conn: PooledConnection,
+    /// `None` after a lost page got no other connection, or its wait for one was
+    /// cancelled. The stream is over.
+    conn: Option<PooledConnection>,
     aggregate_key: AggregateKey,
     filters: ReadFilters,
     buffer: std::collections::VecDeque<AggregateEventBatch>,
@@ -1388,7 +1406,7 @@ impl PooledReadAllIterator {
         filters: Option<ReadFilters>,
     ) -> Self {
         Self {
-            conn,
+            conn: Some(conn),
             aggregate_key,
             filters: filters.unwrap_or_else(|| ReadFilters::new(1)),
             buffer: std::collections::VecDeque::new(),
@@ -1416,16 +1434,13 @@ impl PooledReadAllIterator {
     }
 
     async fn fetch_next_page(&mut self) -> Result<bool, ClientError> {
-        let request = ReadRequest {
-            correlation_id: None,
-            aggregate_key: self.aggregate_key.clone(),
-            filters: self.filters.clone(),
-        };
-        let response = match self.conn.client().read(request).await {
+        let response = match self.read_page().await {
             Ok(r) => r,
             Err(e) => {
                 if leaves_connection_dirty(&e) {
-                    self.conn.mark_broken();
+                    if let Some(conn) = self.conn.as_mut() {
+                        conn.mark_broken();
+                    }
                     self.exhausted = true;
                 }
                 return Err(e);
@@ -1438,6 +1453,43 @@ impl PooledReadAllIterator {
                 Ok(true)
             }
             None => Ok(false),
+        }
+    }
+
+    /// A read changes nothing, so a page whose reply was lost goes once more on
+    /// another connection. Same node: a replica further behind would take the
+    /// cursor and end the stream early. Batches are buffered only once a whole
+    /// reply has arrived, so the re-sent page neither repeats nor skips one.
+    async fn read_page(&mut self) -> Result<ReadResponse, ClientError> {
+        let request = self.page_request();
+        let Some(conn) = self.conn.as_mut() else {
+            self.exhausted = true;
+            return Err(ClientError::ConnectionLostAfterSend(std::io::ErrorKind::Interrupted.into()));
+        };
+        match conn.client().read(request).await {
+            Err(ClientError::ConnectionLostAfterSend(_)) => {}
+            other => return other,
+        }
+        let node = Arc::clone(&conn.return_to);
+        conn.mark_broken();
+        // Released first: with one connection per node the next lease waits on this one's slot.
+        self.conn = None;
+        let fresh = match node.get().await {
+            Ok(fresh) => fresh,
+            Err(e) => {
+                self.exhausted = true;
+                return Err(e);
+            }
+        };
+        let request = self.page_request();
+        self.conn.insert(fresh).client().read(request).await
+    }
+
+    fn page_request(&self) -> ReadRequest {
+        ReadRequest {
+            correlation_id: None,
+            aggregate_key: self.aggregate_key.clone(),
+            filters: self.filters.clone(),
         }
     }
 
